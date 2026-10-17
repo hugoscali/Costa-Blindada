@@ -121,3 +121,12 @@ weapon_3={
 
 lights_and_shadows/directional_shadow/size=2048
 environment/defaults/default_clear_color=Color(0.55, 0.78, 0.91, 1)
+; Render en su propio hilo: el trabajo CPU de dibujo/skinning deja de bloquear
+; la logica del juego (usa un nucleo aparte). Values: 1=Safe, 2=Separate.
+driver/threads/thread_model=2
+; Reflex (Streamline/NVIDIA, 0=off 1=low latency 2=low latency+boost): acorta la cola
+; de render, o sea baja la latencia mouse-a-pantalla. Es el complemento natural de
+; DLSS Frame Generation, que al intercalar frames agrega alrededor de 1 frame de latencia.
+; Solo tiene efecto en builds exportados con engine rtx-godot (en el editor el motor
+; desactiva Streamline) y en GPUs NVIDIA.
+streamline/reflex_mode=1

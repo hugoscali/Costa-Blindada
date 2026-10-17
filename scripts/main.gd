@@ -55,7 +55,6 @@ var ammo: Array = [999999, 300, 20]
 var enemies: Array = []
 var projectiles: Array = []
 var enemy_projectiles: Array = []
-var particles_list: Array = []
 var crates: Array = []
 var crate_timer: float = 8.0
 
@@ -65,6 +64,21 @@ var abl_rapid_t: float = 0.0       # RÃ¡faga: 5s 3x velocidad disparo
 var abl_shield_t: float = 0.0      # Escudo: 8s bloquea balas enemigas
 var abl_overload_t: float = 0.0    # Sobrecarga: 5s 2x daÃ±o
 var abl_mines: Array = []          # Minas activas [{node, armed:bool}]
+
+# --- ARRANQUE RAPIDO PARA PROBAR (apagado) --------------------------------------
+# Sirve para empezar la partida directo en una oleada alta, con puntos de combate y
+# el cargamento correspondiente, y asi medir rendimiento sin jugar 10 oleadas.
+# Apagado: arranca en la oleada 1 con 0 puntos, como siempre. Para usarlo de nuevo:
+# DEBUG_START_WAVE = 10 y DEBUG_START_POINTS = 400.
+var DEBUG_START_WAVE: int = 1
+var DEBUG_START_POINTS: int = 0
+
+func _debug_apply_start() -> void:
+	if DEBUG_START_WAVE <= 1 and DEBUG_START_POINTS <= 0:
+		return
+	wave = DEBUG_START_WAVE
+	combat_pts = DEBUG_START_POINTS
+	ammo = [999999, 400, 50]
 
 # â”€â”€â”€ I18N (ES / EN) â”€â”€â”€
 var lang: int = 0  # 0 = EspaÃ±ol (default), 1 = English â€” persistido en settings.json
@@ -169,6 +183,9 @@ func _ready() -> void:
 	world = Node3D.new()
 	world.name = "World"
 	add_child(world)
+	_fx = FxPool.new()
+	_fx.name = "FxPool"
+	add_child(_fx)  # pool de VFX: ver scripts/fx_pool.gd
 	_load_settings()
 	_build_environment()
 	_build_camera()
@@ -205,6 +222,26 @@ var water_node: MeshInstance3D
 var _wmath := WorldMath.new()  # matemÃ¡tica de mundo + heightmap: ver scripts/world_math.gd
 var rock_spots: Array = []  # [Vector2 pos_xz, float radio] â€” bloques para esquivar
 var shake_amount: float = 0.0
+
+# --- IA de evitacion en paralelo (WorkerThreadPool): ver scripts/enemy_ai.gd ---
+# main.gd solo entrega posiciones planas y recibe vectores ya calculados; ningun
+# hilo de trabajo toca nodos de la escena.
+var _ai := EnemyAI.new()
+var _ai_sold: PackedFloat32Array = PackedFloat32Array()    # (x, z) por soldado vivo
+var _ai_tanks: PackedFloat32Array = PackedFloat32Array()   # (x, z) por tanque vivo
+var _ai_rocks: PackedFloat32Array = PackedFloat32Array()   # (x, z, radio) cacheado de rock_spots
+var _ai_bullets: PackedFloat32Array = PackedFloat32Array() # (x, z, dx, dz) balas del jugador
+
+# --- Pool de VFX de explosion (particulas, destellos, luces): ver scripts/fx_pool.gd ---
+# Antes cada impacto creaba y liberaba sus propios nodos y materiales en el hilo
+# principal. El pool los reutiliza; las formulas de movimiento no cambian.
+var _fx: FxPool = null
+
+# --- Medidor de costo por subsistema -------------------------------------------
+# Se uso para encontrar el cuello real del frame (era _update_projectiles) y ya no
+# hace falta: los numeros que dio estan documentados en refactor_notes/. Si alguna
+# vez hace falta volver a medir, la tecnica es la misma: dos Time.get_ticks_usec()
+# por bloque de _process y mostrar el promedio cada 0.5 s.
 
 # â”€â”€â”€ MULTIJUGADOR (LAN) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Host autoritativo: simula todo y broadcastea estado ~20 Hz.
@@ -731,9 +768,9 @@ func _build_split_viewports() -> void:
 	vp_a.size = vp_size
 	vp_a.msaa_3d = get_viewport().msaa_3d
 	# Heredar el upscale FSR configurado en Opcionesâ†’GrÃ¡ficos (los SubViewport no lo heredan solos)
-	vp_a.scaling_3d_mode = get_viewport().scaling_3d_mode
-	vp_a.scaling_3d_scale = get_viewport().scaling_3d_scale
-	vp_a.fsr_sharpness = get_viewport().fsr_sharpness
+	vp_a.scaling_3d_mode = _scal_mode
+	vp_a.scaling_3d_scale = _scal_scale
+	vp_a.fsr_sharpness = _scal_sharp
 	# own_world_3d: SI. Sin esto el SubViewport comparte el mundo de la escena y
 	# renderiza el arma ORIGINAL (hijo de la camara principal) dentro de cada
 	# mitad = caÃ±ones fantasma duplicados junto al clone.
@@ -752,9 +789,9 @@ func _build_split_viewports() -> void:
 	vp_b.name = "SplitVPB"
 	vp_b.size = vp_size
 	vp_b.msaa_3d = get_viewport().msaa_3d
-	vp_b.scaling_3d_mode = get_viewport().scaling_3d_mode  # idem J1: heredar FSR
-	vp_b.scaling_3d_scale = get_viewport().scaling_3d_scale
-	vp_b.fsr_sharpness = get_viewport().fsr_sharpness
+	vp_b.scaling_3d_mode = _scal_mode  # idem J1: heredar el upscale de las vistas de juego
+	vp_b.scaling_3d_scale = _scal_scale
+	vp_b.fsr_sharpness = _scal_sharp
 	vp_b.own_world_3d = true  # idem J1: aisla el mundo y evita el arma original duplicada
 	add_child(vp_b)
 	_split_build_vp_world(vp_b)
@@ -765,6 +802,8 @@ func _build_split_viewports() -> void:
 	vp_b.add_child(cam_b)
 	_split_assign_camera(vp_b, cam_b)
 	gun_b = _split_clone_gun(vp_b)
+	# El raiz pasa a ser solo compositor 2D de las dos mitades: apagar su upscale 3D.
+	_root_scaling_for_split()
 	# â”€â”€ Display: 2 TextureRect (mitad de pantalla) sobre el canvas principal â”€â”€
 	var disp := CanvasLayer.new()
 	disp.name = "SplitDisplay"
@@ -1289,6 +1328,9 @@ func _teardown_split() -> void:
 		camera.current = true
 	if world != null:
 		world.visible = true
+	# El raiz vuelve a ser la vista de juego: recupera el upscale/Frame Generation que
+	# el usuario configuro (en split estaban apagados a proposito: ver _apply_fsr).
+	_apply_fsr()
 	for nm in ["WeaponIndicatorP1", "MusicLabelP1", "AbilityBarP2", "HPBarP2", "VidaLabelP2", "BaseIconP2", "ScoreLabelP1", "WaveLabelP1", "PtsLabelP1"]:
 		var nd: Node = hud.get_node_or_null(nm)
 		if nd != null:
@@ -1318,7 +1360,9 @@ func _start_game_mp() -> void:
 	enemies.clear()
 	projectiles.clear()
 	enemy_projectiles.clear()
-	particles_list.clear()
+	if _fx != null:
+		_fx.release_all()  # particulas y luces de vuelta al pool (no se liberan)
+	_vfx_release_all()
 	crates.clear()
 	crate_timer = 8.0
 	for pm in get_tree().get_nodes_in_group("PlayerMines"):
@@ -1335,6 +1379,7 @@ func _start_game_mp() -> void:
 	# lado como en split, y los orÃ­genes de disparo (_player_station) coinciden con la mira.
 	camera.position = _cam_anchor()
 	_apply_base_fire_stage(0)
+	_debug_apply_start()  # TEMPORAL: arranque en oleada alta (el host lo manda a los clientes)
 	if mp_role != 2:
 		_start_wave()
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -1540,8 +1585,14 @@ func _play_local_sfx(idx: int) -> void:
 
 # HOST: chispas de impacto chico (pistola/AM, blindaje de tanque, casco, cajas). El grande
 # viaja como "boom" desde _big_boom.
+# HIT_SPARK_SIZE: las chispas son esferas CHICAS. Con el radio completo de _explode
+# (0.1-0.5 m) cada impacto se veia como un racimo de pelotas, y con el FPS bajo cada
+# particula quedaba visible varios frames: el racimo se leia como globos flotando.
+# Los booms grandes (_big_boom, _kill_enemy) conservan el tamano completo.
+const HIT_SPARK_SIZE: float = 0.24
+
 func _hit_spark(pos: Vector3, count: int, color: Color, snd_idx: int = -1) -> void:
-	_explode(pos, count, color)
+	_explode(pos, count, color, HIT_SPARK_SIZE)
 	if snd_idx >= 0:
 		_play_local_sfx(snd_idx)
 	if mp_role == 1:
@@ -1559,7 +1610,7 @@ func _spawn_net_fx(fx: Array) -> void:
 		"spark":
 			if fx.size() >= 8:
 				var sp := Vector3(float(fx[1]), float(fx[2]), float(fx[3]))
-				_explode(sp, int(fx[4]), Color(float(fx[5]), float(fx[6]), float(fx[7])))
+				_explode(sp, int(fx[4]), Color(float(fx[5]), float(fx[6]), float(fx[7])), HIT_SPARK_SIZE)
 				if fx.size() >= 9:
 					_play_net_sfx(int(fx[8]), sp)
 		"snd":
@@ -2144,6 +2195,11 @@ func _process(delta: float) -> void:
 			menu_nav_repeat_t = 0.0
 
 	_update_hud_scale()
+	# Destellos, anillos y luces de explosion: se integran siempre (igual que los
+	# Tween de antes, que seguian corriendo en pausa y en el game over).
+	if _fx != null:
+		_fx.tick_fx(delta)
+	_vfx_tick(delta)  # expira y devuelve al pool las instancias Binbun activas
 	# â”€â”€ Crosshair: visible solo durante gameplay activo (sin menÃºs) â”€â”€
 	if crosshair_layer != null:
 		crosshair_layer.visible = (phase == GamePhase.PLAYING) and not _abilities_menu_open and not _abl1_open
@@ -2234,6 +2290,20 @@ func _process(delta: float) -> void:
 		if mp_players > 1:
 			_update_player_avatars()
 
+# â”€â”€â”€ SOMBRAS DEL SOL (valores verificados en rtx-godot 4.8) â”€â”€â”€
+# DirectionalLight3D.directional_shadow_mode: 0=Orthogonal (Fast) Â· 1=PSSM 2 Splits
+# Â· 2=PSSM 4 Splits (default del engine). Cada split recorre TODA la geometria
+# visible y el skinning de esos passes se hace por CPU: menos splits = menos CPU.
+const SHADOW_MODE_PSSM_2: int = 1
+const SHADOW_MODE_PSSM_4: int = 2
+const SHADOW_MAX_DISTANCE_M: float = 100.0  # 0 = toda la escena (mas caro)
+# BaseMaterial3D.ShadowCastingSetting: 0=Off Â· 1=On Â· 2=Double-Sided Â· 3=Shadows Only
+const SHADOW_CASTING_OFF: int = 0
+const SHADOW_CASTING_ON: int = 1
+# Soldados: cada surface del rig se dibuja de nuevo en cada split de la cascada.
+# Con SSAO siguen teniendo contacto con el suelo. Cambiar a true para sombra dura.
+const SOLDIER_CAST_SHADOW: bool = true   # ON por pedido: sombras duras en los soldados
+
 # â”€â”€â”€ ENVIRONMENT â”€â”€â”€
 func _build_environment() -> void:
 	# Sky3D addon: real sky, sun and clouds (replaces old procedural sky)
@@ -2259,6 +2329,11 @@ func _build_environment() -> void:
 	sky3d.wind_speed = 2.0
 	sky3d.sun.shadow_bias = 0.1
 	sky3d.sun.shadow_normal_bias = 0.03
+	# Cascadas: 4 splits -> 2 splits. Es la mitad del trabajo de sombra (draw calls
+	# + skinning por CPU) sobre TODA la escena, oleada tras oleada.
+	sky3d.sun.directional_shadow_mode = SHADOW_MODE_PSSM_2
+	sky3d.sun.directional_shadow_blend_splits = true
+	sky3d.sun.directional_shadow_max_distance = SHADOW_MAX_DISTANCE_M
 
 	# â”€â”€ Realism post-processing: SSAO (contact shadows) + SDFGI (global illumination) + Glow + SSR (reflections) â”€â”€
 	var env: Environment = sky3d.environment
@@ -3950,6 +4025,11 @@ const SCALING_3D_MODE_DLSS := 6  # Viewport.SCALING_3D_MODE_DLSS en el fork rtx-
 
 var dlss_supported := false  # true si el engine en ejecuciÃ³n expone DLSS (lo calcula _apply_fsr)
 
+# Upscale que usan las vistas de juego (raiz en single, mitades en split): ver _apply_fsr()
+var _scal_mode: int = 0
+var _scal_scale: float = 1.0
+var _scal_sharp: float = 0.0
+
 # Detecta APIs exclusivas del engine con Streamline (singleton + propiedad frame_generation).
 # Sondea en vez de tocar las constantes del fork para que el script parsee tambiÃ©n en Godot 4.7.
 func _engine_has_dlss() -> bool:
@@ -3988,14 +4068,37 @@ func _apply_fsr() -> void:
 	# renderizados. Requiere que el scaling estÃ© en DLSS; en split puede no inicializar.
 	if dlss_supported:
 		vp.set("frame_generation", fg_enabled and use_dlss)
+	# Config de upscale de las VISTAS DE JUEGO: en single es el viewport raiz; en split
+	# son las dos mitades. Se guarda para que _build_split_viewports() y cambiar las
+	# opciones a mitad de split usen exactamente la misma config.
+	_scal_mode = int(vp.get("scaling_3d_mode"))
+	_scal_scale = float(vp.get("scaling_3d_scale"))
+	_scal_sharp = float(vp.get("fsr_sharpness"))
+	# Split: el viewport raiz NO renderiza 3D (camera.current = false, world oculto).
+	# Dejarle DLSS/Frame Generation hace que corra el pase de upscale + optical flow del
+	# SDK sobre un buffer vacio, a resolucion completa de ventana. Medido en oleada 12 con
+	# dos jugadores: 74 FPS -> 105 FPS. Las mitades conservan su propio DLSS, y volver a
+	# single lo restaura _teardown_split().
+	if split_mode:
+		_root_scaling_for_split()
 	# Split: los SubViewport tienen su propio scaling 3D (no heredan del root):
 	# propagar la misma configuraciÃ³n a las mitades de J1/J2.
 	for sub in [vp_a, vp_b]:
 		if sub:
-			sub.scaling_3d_mode = vp.scaling_3d_mode
-			sub.scaling_3d_scale = vp.scaling_3d_scale
-			sub.fsr_sharpness = vp.fsr_sharpness
+			sub.scaling_3d_mode = _scal_mode
+			sub.scaling_3d_scale = _scal_scale
+			sub.fsr_sharpness = _scal_sharp
 	_save_settings()
+
+# El viewport raiz deja de ser una vista de juego en pantalla dividida: apaga su upscale
+# 3D y el Frame Generation (no hay camara activa ni world visible: solo gastaria GPU).
+func _root_scaling_for_split() -> void:
+	var vpr = get_viewport()
+	vpr.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
+	vpr.scaling_3d_scale = 1.0
+	if dlss_supported:
+		vpr.set("frame_generation", false)
+
 
 func _resolutions() -> Array:
 	# Resoluciones disponibles segÃºn la relaciÃ³n de aspecto elegida
@@ -4332,7 +4435,9 @@ func _mp_abort_cleanup() -> void:
 	enemies.clear()
 	projectiles.clear()
 	enemy_projectiles.clear()
-	particles_list.clear()
+	if _fx != null:
+		_fx.release_all()  # particulas y luces de vuelta al pool (no se liberan)
+	_vfx_release_all()
 	crates.clear()
 	for pm in get_tree().get_nodes_in_group("PlayerMines"):
 		(pm as Node).queue_free()
@@ -4341,10 +4446,7 @@ func _mp_abort_cleanup() -> void:
 	for child in get_children():
 		if child.name.begins_with("Enemy_") or child.name.begins_with("Proj_") or child.name.begins_with("EProj_") or child.name.begins_with("Crate_") or child.name.begins_with("Mine_") or child.name.begins_with("FX_") or child.name == "ShieldVis":
 			child.queue_free()
-	for v in _active_vfx:
-		if is_instance_valid(v):
-			v.queue_free()
-	_active_vfx.clear()
+	_vfx_release_all()  # devuelve las instancias Binbun al pool (no las libera)
 	# Estado de red: pools de nodos y FX pendientes
 	net_enemy_nodes.clear()
 	net_proj_nodes.clear()
@@ -4716,7 +4818,9 @@ func _start_game() -> void:
 	enemies.clear()
 	projectiles.clear()
 	enemy_projectiles.clear()
-	particles_list.clear()
+	if _fx != null:
+		_fx.release_all()  # particulas y luces de vuelta al pool (no se liberan)
+	_vfx_release_all()
 	crates.clear()
 	crate_timer = 8.0
 	# Remove old enemy/projectile/mine/VFX nodes (los VFX se agregan al nodo raÃ­z y no se liberaban solas)
@@ -4730,10 +4834,7 @@ func _start_game() -> void:
 		if child.name.begins_with("Enemy_") or child.name.begins_with("Proj_") or child.name.begins_with("EProj_") or child.name.begins_with("Crate_") or child.name.begins_with("Mine_") or child.name.begins_with("FX_") or child.name == "ShieldVis":
 			child.queue_free()
 	# Limpiar la lista de VFX activos
-	for v in _active_vfx:
-		if is_instance_valid(v):
-			v.queue_free()
-	_active_vfx.clear()
+	_vfx_release_all()  # devuelve las instancias Binbun al pool (no las libera)
 	# Clear all transient overlays; keep persistent HUD (hp, score, wave, weapon, ammo, music)
 	_hud.clear_overlay_nodes()
 	entering_initials = false
@@ -4742,6 +4843,7 @@ func _start_game() -> void:
 	base_destroying = false
 	base_explosion_timer = 999.0
 	_apply_base_fire_stage(0)
+	_debug_apply_start()  # TEMPORAL: arranque en oleada alta (ver DEBUG_START_WAVE)
 	_start_wave()
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
@@ -5431,7 +5533,10 @@ func _create_soldier_mesh() -> Node3D:
 	for mi_node in model.find_children("", "MeshInstance3D"):
 		var mi := mi_node as MeshInstance3D
 		if mi != null and hide_weapons.has(mi.name):
+			# Se LIBERAN, no solo se esconden: 13 MeshInstance3D por soldado quedaban
+			# atados al Skeleton3D como superficies skinned que nunca se dibujaban.
 			mi.visible = false
+			mi.free()
 
 	# â”€â”€ Normalizar: alto 1.75 m, pies en y=0, centrado en el origen â”€â”€
 	var combined := AABB()
@@ -5500,8 +5605,25 @@ func _create_soldier_mesh() -> Node3D:
 	mflash.name = "MuzzleFlash"
 	gun.add_child(mflash)
 
-	
+	_apply_soldier_shadow(model)
 	return model
+
+# Sombras duras de soldados (SOLDIER_CAST_SHADOW = true por pedido).
+# El costo real es (superficies VISIBLES del rig) x (splits de la cascada): por eso
+# el rack de armas del GLB se libera en _create_soldier_mesh y las mallas ocultas
+# no proyectan. Con el rig actual quedan 5 mallas visibles (Body, Head, AK, 2 hombreras).
+func _apply_soldier_shadow(model: Node3D) -> void:
+	var stack: Array = [model]
+	while stack.size() > 0:
+		var nd: Node = stack.pop_back()
+		if nd is MeshInstance3D:
+			var mi: MeshInstance3D = nd
+			if SOLDIER_CAST_SHADOW and mi.visible:
+				mi.cast_shadow = SHADOW_CASTING_ON
+			else:
+				mi.cast_shadow = SHADOW_CASTING_OFF
+		for ch in nd.get_children():
+			stack.append(ch)
 
 # â”€â”€â”€ Military gear (rigid accessories synced to skeleton bones) â”€â”€â”€
 func _add_military_gear(model: Node3D) -> void:
@@ -5661,6 +5783,7 @@ func _create_soldier_fallback() -> Node3D:
 		gun.add_child(mflash)
 
 	_add_military_gear(model)
+	_apply_soldier_shadow(model)
 	return model
 
 func _alias_anim(ap: AnimationPlayer, lib: AnimationLibrary, alias_name: String, src_name: String, loop: bool) -> void:
@@ -5990,7 +6113,61 @@ func _enemy_shoot(from: Vector3, target: Vector3) -> void:
 	enemy_projectiles.append({"node": proj, "dir": dir, "speed": 30.0, "life": 4.0})
 
 # â”€â”€â”€ UPDATES â”€â”€â”€
+# --- Indice de colision de proyectiles (ver scripts/hit_space.gd) --------------
+# Una sola grilla por frame para los tres loops que eran O(balas x enemigos):
+# deteccion de impacto, _cannon_will_kill_vehicle y _cannon_splash. Las reglas
+# (radios, quien recibe el golpe, el orden) son las mismas de antes.
+const MAX_HIT_RADIUS: float = 10.0   # la hitbox mas grande (tanque/avion); el resto va en HitSpace.rad
+# Estela de los misiles: un puf cada MISSILE_TRAIL_GAP METROS recorridos, no uno por
+# frame. Por frame quedaba una pared continua a 140 FPS y bolas sueltas y grandes a 20.
+const MISSILE_TRAIL_GAP: float = 1.1
+const MISSILE_TRAIL_PUFF: float = 0.22
+var _hs: HitSpace = HitSpace.new()
+var _hit_by_id: Dictionary = {}      # id -> indice actual en "enemies"
+var _hit_by_id_n: int = -1           # -1 fuerza a rehacer el mapa (hubo kills)
+
+func _hit_kind(t: String) -> int:
+	match t:
+		"soldier": return HitSpace.K_SOLDIER
+		"boat": return HitSpace.K_BOAT
+		"tank": return HitSpace.K_TANK
+		"plane": return HitSpace.K_PLANE
+	return HitSpace.K_OTHER
+
+func _hit_rebuild() -> void:
+	_hs.clear()
+	_hit_by_id.clear()
+	for j in enemies.size():
+		var e: Dictionary = enemies[j]
+		var nd_v: Variant = e.get("node")
+		if nd_v == null or not is_instance_valid(nd_v):
+			continue
+		var nd: Node3D = nd_v
+		var k: int = _hit_kind(str(e.get("type", "")))
+		var r: float = 3.5
+		match k:
+			HitSpace.K_BOAT: r = 6.0
+			HitSpace.K_TANK, HitSpace.K_PLANE: r = 10.0
+		var eid: int = int(e.get("id", -1))
+		_hs.add(nd.position, r, eid, j, k, e)
+		if eid >= 0:
+			_hit_by_id[eid] = j
+	_hit_by_id_n = enemies.size()
+
+# La lista de enemigos se acorta cuando mueren en el medio del frame: el mapa
+# id -> indice se rehace una sola vez y vale hasta el proximo kill.
+func _hit_index_of(id: int) -> int:
+	if _hit_by_id_n != enemies.size():
+		_hit_by_id.clear()
+		for k in enemies.size():
+			var eid2: int = int(enemies[k].get("id", -1))
+			if eid2 >= 0:
+				_hit_by_id[eid2] = k
+		_hit_by_id_n = enemies.size()
+	return int(_hit_by_id.get(id, -1))
+
 func _update_projectiles(delta: float) -> void:
+	_hit_rebuild()  # la grilla se construye antes de mover las balas: vale todo el frame
 	for i in range(projectiles.size() - 1, -1, -1):
 		var p: Dictionary = projectiles[i]
 		kill_credit_slot = int(p.get("slot", -1))  # kills de esta bala acreditan a su tirador
@@ -6010,30 +6187,35 @@ func _update_projectiles(delta: float) -> void:
 			var flame_n: Node = pnode.get_node_or_null("Flame")
 			if flame_n:
 				flame_n.scale = Vector3.ONE * randf_range(1.2, 2.2)
-			# Estela FINA: 1 puf chiquito y claro por frame (antes era una pared blanca)
-			_smoke_burst(pnode.position - pdir * 0.5, 1, 0.35, Color(0.92, 0.92, 0.88), 0.35, 0.4)
+			# Estela FINA: un puf chiquito y claro, pero uno cada MISSILE_TRAIL_GAP
+			# metros de recorrido (antes era uno por frame: pared blanca a 140 FPS y
+			# bolas grandes y separadas a 20 FPS).
+			var td: float = float(p.get("trail_d", 0.0)) + pspeed * delta
+			if td >= MISSILE_TRAIL_GAP:
+				td = 0.0
+				_smoke_burst(pnode.position - pdir * 0.5, 1, 0.35, Color(0.92, 0.92, 0.88), MISSILE_TRAIL_PUFF, 0.4)
+			p["trail_d"] = td
 		plife -= delta
 		if plife <= 0:
 			pnode.queue_free()
 			projectiles.remove_at(i)
 			continue
-		# Collision
+		# Fuera del campo de juego no puede tocar a nadie: los enemigos nacen y viven
+		# dentro de ~270 m y siempre vienen hacia la base. Soltar aca recorta el
+		# tiempo que una bala perdida sigue costando CPU y un nodo dibujado.
+		var cull_p: Vector3 = pnode.position
+		if absf(cull_p.x) > 340.0 or absf(cull_p.z) > 340.0 or cull_p.y > 220.0 or cull_p.y < -30.0:
+			pnode.queue_free()
+			projectiles.remove_at(i)
+			continue
+		# Collision: sale de la grilla (ver HitSpace). Entre los solapados gana el de
+		# indice mas alto en "enemies", igual que el for j descendente de antes.
 		var hit := false
-		for j in range(enemies.size() - 1, -1, -1):
-			var e: Dictionary = enemies[j]
-			var enode_v: Variant = e.get("node")
-			if enode_v == null or not is_instance_valid(enode_v):
-				enemies.remove_at(j)  # entrada corrupta: no debe romper el disparo
-				continue
-			var enode: Node3D = enode_v
-			var edist: float = pnode.position.distance_to(enode.position)
-			var eradius: float
-			match e["type"]:
-				"boat": eradius = 6.0  # proporcional a la lancha (12.25 m)
-				"tank": eradius = 10.0  # proporcional al tanque x3
-				"plane": eradius = 10.0
-				_: eradius = 3.5
-			if edist < eradius + parea:
+		var best_slot: int = _hs.best_hit(pnode.position, MAX_HIT_RADIUS + parea, parea)
+		if best_slot >= 0:
+			var j: int = _hit_index_of(_hs.ids[best_slot])
+			if j >= 0:
+				var e: Dictionary = enemies[j]
 				hit = true
 				if e["type"] == "tank" and psplash <= 0.0:
 					# Tanks only take damage from the cannon â€” pistol/AM spark off the armor
@@ -6074,7 +6256,6 @@ func _update_projectiles(delta: float) -> void:
 					_hit_spark(pnode.position, 4, Color(1, 0.7, 0))
 					if ehealth <= 0:
 						_kill_enemy(j)
-				break
 		# Collision with supply crates
 		for k in range(crates.size() - 1, -1, -1):
 			var cnode: Node3D = crates[k]["node"]
@@ -6107,6 +6288,7 @@ func _kill_enemy(j: int) -> void:
 	# Lo sacamos de la lista ANTES de los efectos: los kills anidados (radio de
 	# fuego del tanque, splash) nunca pueden desfasar el Ã­ndice de esta entrada.
 	enemies.remove_at(j)
+	_hit_by_id_n = -1  # la lista se acorto: el mapa id -> indice se rehace al proximo uso
 	# El cliente no corre esta funciÃ³n: avisarle quÃ© enemigo muriÃ³ y de quÃ© tipo, para que
 	# retire el nodo con su animaciÃ³n de caÃ­da en vez de hacerlo desaparecer de golpe.
 	if mp_role == 1:
@@ -6201,17 +6383,19 @@ func _cannon_will_kill_vehicle(pos: Vector3, direct: Dictionary, pdamage: float,
 			return true
 	# Otros barcos/helis dentro del radio del splash mueren por el splash
 	if psplash > 0.0:
-		for e in enemies:
-			if not (e is Dictionary):
+		var cn: int = _hs.candidates(pos, psplash)
+		var r2: float = psplash * psplash
+		for ci in cn:
+			var slot: int = _hs.buf[ci]
+			var k: int = _hs.kind[slot]
+			if k == HitSpace.K_SOLDIER or k == HitSpace.K_TANK:
 				continue
-			var t: String = str(e.get("type", ""))
-			if t == "soldier" or t == "tank":
-				continue
-			var en_v: Variant = e.get("node")
-			if en_v == null or not is_instance_valid(en_v):
-				continue
-			var en: Node3D = en_v
-			if en.position.distance_to(pos) <= psplash and float(e["health"]) - CANNON_SPLASH_DMG <= 0.0:
+			if _hit_index_of(_hs.ids[slot]) < 0:
+				continue  # ya murio en este frame: su boom de muerte ya cubre la zona
+			var dx: float = pos.x - _hs.px[slot]
+			var dy: float = pos.y - _hs.py[slot]
+			var dz: float = pos.z - _hs.pz[slot]
+			if dx * dx + dy * dy + dz * dz <= r2 and float(_hs.ent[slot]["health"]) - CANNON_SPLASH_DMG <= 0.0:
 				return true
 	return false
 
@@ -6238,35 +6422,93 @@ func _maybe_drop_ammo_on_kill(kill_pos: Vector3) -> void:
 		_spawn_floating_text(kill_pos + Vector3(0, 1.5, 0), txt, Color(0.5, 0.9, 1.0))
 
 func _cannon_splash(pos: Vector3, radius: float) -> void:
-	# Primero aplica daÃ±o a todos, luego recoge los kills y los mata de atrÃ¡s
-	# hacia adelante. (Matar durante la iteraciÃ³n desfasa los Ã­ndices y causaba
-	# doble kill + errores de Ã­ndice fuera de rango.)
+	# Primero aplica dano a todos, luego recoge los kills y los mata de atras hacia
+	# adelante (igual que antes). Los candidatos salen de la grilla y se ordenan por
+	# el indice que cada enemigo tenia en "enemies" al construirla; al matar se
+	# resuelve el indice actual por id, asi que los kills del propio frame no desfasan.
+	var cn: int = _hs.candidates(pos, radius + 5.0)
+	if cn == 0:
+		return
+	var slots: Array = []
+	for ci in cn:
+		var slot: int = _hs.buf[ci]
+		var o: int = _hs.ord[slot]
+		var at: int = slots.size()
+		while at > 0 and int(_hs.ord[int(slots[at - 1])]) > o:
+			at -= 1
+		slots.insert(at, slot)  # insercion ordenada: siempre son unos pocos elementos
 	var to_kill: Array = []
-	for j in range(enemies.size()):
-		var e: Dictionary = enemies[j]
-		var en_v: Variant = e.get("node")
-		if en_v == null or not is_instance_valid(en_v):
+	for si in slots.size():
+		var s2: int = int(slots[si])
+		var e: Dictionary = _hs.ent[s2]
+		var is_tank: bool = _hs.kind[s2] == HitSpace.K_TANK
+		var dx2: float = pos.x - _hs.px[s2]
+		var dy2: float = pos.y - _hs.py[s2]
+		var dz2: float = pos.z - _hs.pz[s2]
+		var reach: float = radius + (5.0 if is_tank else 0.0)
+		if dx2 * dx2 + dy2 * dy2 + dz2 * dz2 > reach * reach:
 			continue
-		var enode: Node3D = en_v
-		var d: float = pos.distance_to(enode.position)
-		var reach: float = radius + (5.0 if e["type"] == "tank" else 0.0)
-		if d > reach:
-			continue
-		if e["type"] == "tank":
+		if is_tank:
 			var armor: int = int(e.get("armor", 2))
 			armor -= 1
 			e["armor"] = armor
-			_hit_spark(enode.position, 8, Color(0.85, 0.8, 0.3))
+			_hit_spark(Vector3(_hs.px[s2], _hs.py[s2], _hs.pz[s2]), 8, Color(0.85, 0.8, 0.3))
 			if armor <= 0:
-				to_kill.append(j)
+				to_kill.append(s2)
 		else:
 			e["health"] -= CANNON_SPLASH_DMG
 			if e["health"] <= 0.0:
-				to_kill.append(j)
+				to_kill.append(s2)
 	for i in range(to_kill.size() - 1, -1, -1):
-		_kill_enemy(int(to_kill[i]))
+		var kk: int = _hit_index_of(_hs.ids[int(to_kill[i])])
+		if kk >= 0:
+			_kill_enemy(kk)
+
+# Recolecta posiciones planas (sin nodos) y deja la evitacion resuelta en los
+# nucleos del CPU. El indice de cada soldado se guarda EN su propia entrada
+# ("ai_i") para que la lectura siga siendo correcta aunque la lista se acorte
+# cuando mueren enemigos durante el loop.
+func _ai_solve(delta: float) -> void:
+	_ai_sold.resize(0)
+	_ai_tanks.resize(0)
+	for e in enemies:
+		var nd_v: Variant = e.get("node")
+		if nd_v == null or not is_instance_valid(nd_v):
+			e["ai_i"] = -1
+			continue
+		var et: String = str(e.get("type", ""))
+		if et != "soldier" and et != "tank":
+			e["ai_i"] = -1
+			continue
+		var nd: Node3D = nd_v
+		if et == "soldier":
+			e["ai_i"] = _ai_sold.size() >> 1
+			_ai_sold.append(nd.position.x)
+			_ai_sold.append(nd.position.z)
+		else:
+			e["ai_i"] = -1
+			_ai_tanks.append(nd.position.x)
+			_ai_tanks.append(nd.position.z)
+	# Los campos de rocas no cambian nunca: se cachean una sola vez
+	if _ai_rocks.size() != rock_spots.size() * 3:
+		_ai_rocks.resize(0)
+		for rp in rock_spots:
+			var rp2: Array = rp
+			_ai_rocks.append(float((rp2[0] as Vector2).x))
+			_ai_rocks.append(float((rp2[0] as Vector2).y))
+			_ai_rocks.append(float(rp2[1]))
+	_ai_bullets.resize(0)
+	for pd in projectiles:
+		var pn: Node3D = pd["node"]
+		var pdir: Vector3 = pd["dir"]
+		_ai_bullets.append(pn.position.x)
+		_ai_bullets.append(pn.position.z)
+		_ai_bullets.append(pdir.x)
+		_ai_bullets.append(pdir.y)
+	_ai.solve(_ai_sold, _ai_tanks, _ai_rocks, _ai_bullets, delta)
 
 func _update_enemies(delta: float) -> void:
+	_ai_solve(delta)  # separacion + esquiva resueltas en paralelo (ver scripts/enemy_ai.gd)
 	for i in range(enemies.size() - 1, -1, -1):
 		var e: Dictionary = enemies[i]
 		var enode_v: Variant = e.get("node")
@@ -6275,6 +6517,7 @@ func _update_enemies(delta: float) -> void:
 			continue
 		var enode: Node3D = enode_v
 		var espeed: float = e["speed"]
+		var ai_i: int = int(e.get("ai_i", -1))  # indice en los buffers de _ai (ver _ai_solve)
 		match e["type"]:
 			"boat":
 				var epos: Vector3 = enode.position
@@ -6307,30 +6550,19 @@ func _update_enemies(delta: float) -> void:
 					var to_base := base_target - enode.global_position
 					enode.rotation.y = atan2(to_base.x, to_base.z)
 					# Si quedÃ³ parado dentro de una pila de rocas, sale empujando hacia afuera
-					for rps2 in rock_spots:
-						var rpos2: Vector2 = rps2[0]
-						var rrad2: float = rps2[1]
-						var raw2: Vector2 = spos2 - rpos2
-						var rd2: float = raw2.length()
-						if rd2 < rrad2:
-							var out2 := (raw2 / maxf(0.01, rd2)) * (rrad2 - rd2) * minf(1.0, delta * 5.0)
-							enode.position.x += out2.x
-							enode.position.z += out2.y
-							enode.position.y = _terrain_height(enode.position.x, enode.position.z)
+					var fr1: Vector2 = _ai.fixr_at(ai_i)  # empuje fuera de la roca (calculado en paralelo)
+					if fr1.length_squared() > 0.000001:
+						var fs1: float = minf(1.0, delta * 5.0)
+						enode.position.x += fr1.x * fs1
+						enode.position.z += fr1.y * fs1
+						enode.position.y = _terrain_height(enode.position.x, enode.position.z)
 					# Si un tanque lo estÃ¡ pisando, sale de su casco
-					var spos_sh: Vector2 = Vector2(enode.position.x, enode.position.z)
-					for oj_sh in range(enemies.size()):
-						var te: Dictionary = enemies[oj_sh]
-						if str(te.get("type", "")) != "tank":
-							continue
-						var ten: Node3D = te["node"]
-						var taway: Vector2 = spos_sh - Vector2(ten.position.x, ten.position.z)
-						var tdist: float = taway.length()
-						if tdist < 2.5:
-							var tout := (taway / maxf(0.01, tdist)) * (2.5 - tdist) * minf(1.0, delta * 6.0)
-							enode.position.x += tout.x
-							enode.position.z += tout.y
-							enode.position.y = _terrain_height(enode.position.x, enode.position.z)
+					var ft1: Vector2 = _ai.fixt_at(ai_i)  # empuje fuera del casco del tanque (en paralelo)
+					if ft1.length_squared() > 0.000001:
+						var fs2: float = minf(1.0, delta * 6.0)
+						enode.position.x += ft1.x * fs2
+						enode.position.z += ft1.y * fs2
+						enode.position.y = _terrain_height(enode.position.x, enode.position.z)
 					if sap != null and sap.has_animation("default/idle") and sap.current_animation != "default/idle":
 						sap.play("default/idle")
 					var etimer: float = e["shoot_timer"]
@@ -6358,18 +6590,7 @@ func _update_enemies(delta: float) -> void:
 						run_dir = Vector2(0.0, 1.0)
 						e["run_dir"] = run_dir
 					# Evasion: push away from nearby player bullets
-					var evasion := Vector2.ZERO
-					for pd in projectiles:
-						var pnode2: Node3D = pd["node"]
-						var bpos: Vector2 = Vector2(pnode2.position.x, pnode2.position.z)
-						var away: Vector2 = spos2 - bpos
-						var bdist: float = away.length()
-						if bdist < 22.0:
-							var bdir: Vector2 = Vector2(pd["dir"].x, pd["dir"].y)
-							var wgt: float = (1.0 - bdist / 22.0) * maxf(0.25, bdir.dot(away / maxf(0.01, bdist)))
-							evasion += (away / maxf(0.01, bdist)) * wgt
-					if evasion.length() > 3.0:
-						evasion = evasion.normalized() * 3.0
+					var evasion: Vector2 = _ai.evade_at(ai_i)  # esquiva de balas (resuelta en paralelo)
 					# Stay on the beach, advance up to 10m in front of the base, never behind/beside it
 					var bounds := Vector2.ZERO
 					if spos2.x < -ENEMY_MAX_X:
@@ -6381,36 +6602,19 @@ func _update_enemies(delta: float) -> void:
 					if spos2.y > ENEMY_HOLD_Z:
 						bounds.y -= 1.0
 					# Esquivar los bloques de roca (no atravesarlos)
-					for rps in rock_spots:
-						var rpos: Vector2 = rps[0]
-						var rrad: float = rps[1]
-						var raway: Vector2 = spos2 - rpos
-						var rdist: float = raway.length()
-						if rdist < rrad:
-							bounds += (raway / maxf(0.01, rdist)) * (1.0 - rdist / rrad) * 4.0
+					bounds += _ai.soft_at(ai_i)  # desvio suave contra los bloques de roca (en paralelo)
 					# CorrecciÃ³n dura: si metiÃ³ dentro del radio, lo saca directamente
-					for rps in rock_spots:
-						var rpos: Vector2 = rps[0]
-						var rrad: float = rps[1]
-						var raway: Vector2 = spos2 - rpos
-						var rdist: float = raway.length()
-						if rdist < rrad:
-							var outv := (raway / maxf(0.01, rdist)) * (rrad - rdist) * minf(1.0, delta * 6.0)
-							enode.position.x += outv.x
-							enode.position.z += outv.y
+					var fr2: Vector2 = _ai.fixr_at(ai_i)  # si metio dentro del radio, lo saca (en paralelo)
+					if fr2.length_squared() > 0.000001:
+						var fs3: float = minf(1.0, delta * 6.0)
+						enode.position.x += fr2.x * fs3
+						enode.position.z += fr2.y * fs3
 					# CorrecciÃ³n dura contra tanques: si terminÃ³ dentro del casco, lo saca
-					var spos_t: Vector2 = Vector2(enode.position.x, enode.position.z)
-					for oj_t in range(enemies.size()):
-						var te2: Dictionary = enemies[oj_t]
-						if str(te2.get("type", "")) != "tank":
-							continue
-						var ten2: Node3D = te2["node"]
-						var taway2: Vector2 = spos_t - Vector2(ten2.position.x, ten2.position.z)
-						var tdist2: float = taway2.length()
-						if tdist2 < 2.5:
-							var tout2 := (taway2 / maxf(0.01, tdist2)) * (2.5 - tdist2) * minf(1.0, delta * 6.0)
-							enode.position.x += tout2.x
-							enode.position.z += tout2.y
+					var ft2: Vector2 = _ai.fixt_at(ai_i)  # si termino dentro del casco, lo saca (en paralelo)
+					if ft2.length_squared() > 0.000001:
+						var fs4: float = minf(1.0, delta * 6.0)
+						enode.position.x += ft2.x * fs4
+						enode.position.z += ft2.y * fs4
 					# Advance toward the base, then hold 10m in front of it (no longer gathering around the player)
 					var to_hold: Vector2 = Vector2.ZERO
 					if spos2.y < ENEMY_HOLD_BAND:
@@ -6419,21 +6623,7 @@ func _update_enemies(delta: float) -> void:
 						to_hold = Vector2(0.0, -1.0) * 0.7
 					# DispersiÃ³n: alejarse de otros soldados cercanos (evitar pelotÃ³n)
 					# y de los tanques (los esquivan, no los atraviesan)
-					var sep := Vector2.ZERO
-					for oj in range(enemies.size()):
-						var oe: Dictionary = enemies[oj]
-						var otype: String = str(oe.get("type", ""))
-						if otype != "soldier" and otype != "tank":
-							continue
-						var oen: Node3D = oe["node"]
-						var opos: Vector2 = Vector2(oen.position.x, oen.position.z)
-						var away2: Vector2 = spos2 - opos
-						var ad2: float = away2.length()
-						var sep_r: float = 7.0 if otype == "soldier" else 5.5
-						if ad2 < sep_r and ad2 > 0.01:
-							sep += (away2 / ad2) * (1.0 - ad2 / sep_r)
-					if sep.length() > 3.0:
-						sep = sep.normalized() * 3.0
+					var sep: Vector2 = _ai.sep_at(ai_i)  # separacion del peloton (en paralelo, con rejilla espacial)
 					var desired: Vector2 = run_dir + evasion * 2.4 + bounds * 3.2 + to_hold * 1.2 + sep * 1.8
 					if desired.length() < 0.01:
 						desired = run_dir
@@ -6571,86 +6761,27 @@ func _update_enemies(delta: float) -> void:
 			continue
 
 func _update_particles(delta: float) -> void:
-	for i in range(particles_list.size() - 1, -1, -1):
-		var p: Dictionary = particles_list[i]
-		var pnode: MeshInstance3D = p["node"]
-		var pvel: Vector3 = p["vel"]
-		var plife: float = p["life"]
-		var g: float = float(p.get("grav", 1.0))
-		var base_a: float = float(p.get("base_alpha", 1.0))
-		var fade: float = maxf(float(p.get("fade", 1.0)), 0.01)
-		pvel.y -= 12.0 * g * delta
-		p["vel"] = pvel
-		pnode.position = pnode.position + pvel * delta
-		plife -= delta
-		p["life"] = plife
-		var mat: StandardMaterial3D = pnode.get_active_material(0) as StandardMaterial3D
-		if mat:
-			var c: Color = mat.albedo_color
-			c.a = clampf(base_a * (plife / fade), 0.0, 1.0)
-			mat.albedo_color = c
-		if plife <= 0 or pnode.position.y < -1:
-			pnode.queue_free()
-			particles_list.remove_at(i)
+	_fx.tick_particles(delta)  # misma fisica y mismo fade: ver scripts/fx_pool.gd
 
 func _flash_light(pos: Vector3, color: Color, energy: float, radius: float, life: float) -> void:
-	var li := OmniLight3D.new()
-	li.light_color = color
-	li.light_energy = energy
-	li.omni_range = radius
-	li.position = pos
-	add_child(li)
-	var tw := create_tween()
-	tw.tween_property(li, "light_energy", 0.0, life).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_callback(li.queue_free)
+	# Misma curva de energia (TRANS_QUAD + EASE_OUT), pero con luces recicladas y
+	# techo de luces simultaneas: antes cada boom anadía una OmniLight3D nueva.
+	_fx.add_light(pos, color, energy, radius, life)
 
 func _smoke_burst(pos: Vector3, count: int, base_alpha: float = 0.5, smoke_color: Color = Color(0.16, 0.15, 0.14), puff_scale: float = 1.0, life_scale: float = 1.0) -> void:
 	count = maxi(1, int(count * particle_scale))
 	for i in count:
-		var s := MeshInstance3D.new()
-		var sm := SphereMesh.new()
+		# Mismos radios, velocidades, vidas y gravedad que antes.
 		var r := randf_range(0.4, 0.9) * puff_scale
-		sm.radius = r
-		sm.height = r * 2
-		s.mesh = sm
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(smoke_color.r, smoke_color.g, smoke_color.b, base_alpha)
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		s.material_override = mat
-		s.position = pos + Vector3(randf_range(-0.6, 0.6), randf_range(0.0, 0.7), randf_range(-0.6, 0.6))
-		add_child(s)
-		s.add_to_group("DynNodes")
-		particles_list.append({
-			"node": s,
-			"vel": Vector3(randf_range(-1.5, 1.5), randf_range(1.2, 3.2), randf_range(-1.5, 1.5)),
-			"life": randf_range(1.6, 3.0) * life_scale, "grav": 0.15, "base_alpha": base_alpha
-		})
+		_fx.add_particle(
+			pos + Vector3(randf_range(-0.6, 0.6), randf_range(0.0, 0.7), randf_range(-0.6, 0.6)),
+			Vector3(randf_range(-1.5, 1.5), randf_range(1.2, 3.2), randf_range(-1.5, 1.5)),
+			randf_range(1.6, 3.0) * life_scale, 0.15, r, r * 2.0, smoke_color, 0.0, true, base_alpha, 1.0)
 
 func _shockwave_ring(pos: Vector3, color: Color, scl: float) -> void:
-	var ring := MeshInstance3D.new()
-	var rm := CylinderMesh.new()
-	rm.top_radius = 0.7
-	rm.bottom_radius = 0.7
-	rm.height = 0.18
-	var rmat := StandardMaterial3D.new()
-	rmat.albedo_color = Color(color.r, color.g, color.b, 0.8)
-	rmat.emission_enabled = true
-	rmat.emission = color
-	rmat.emission_energy_multiplier = 5.0
-	rmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ring.mesh = rm
-	ring.material_override = rmat
-	ring.position = pos + Vector3(0, 0.25, 0)
-	ring.scale = Vector3.ONE * 0.4
-	add_child(ring)
-	ring.add_to_group("DynNodes")
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(ring, "scale", Vector3.ONE * (7.0 * scl), 0.55).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_property(rmat, "albedo_color:a", 0.0, 0.55)
-	tw.chain().tween_callback(ring.queue_free)
+	# Mismo anillo (cilindro r0.7 h0.18), misma expansion 0.4 -> 7.0*scl en 0.55 s con
+	# TRANS_QUAD+EASE_OUT y mismo fade 0.8 -> 0. Ahora con nodo y material del pool.
+	_fx.add_flash(pos + Vector3(0, 0.25, 0), true, Vector3.ONE * 0.4, Vector3.ONE * (7.0 * scl), color, 5.0, true, 0.8, 0.55, 0.55)
 
 # â”€â”€â”€ BINBUN VFX (explosiones + destello de boquilla) con fallback procedural â”€â”€â”€
 var _vfx_exp_ground: PackedScene = null
@@ -6658,7 +6789,7 @@ var _vfx_exp_air: PackedScene = null
 var _vfx_exp_nuke: PackedScene = null
 var _vfx_muzzle: PackedScene = null
 var _vfx_loaded := false
-var _active_vfx: Array = []   # VFX activos (explosiones, fuego, destellos) para limpiar al reiniciar
+# (antes existia _active_vfx: ahora las instancias viven en el pool de _vfx_free/_vfx_busy)
 
 func _load_binbun_vfx() -> void:
 	if _vfx_loaded:
@@ -6720,6 +6851,88 @@ func _collect_tscn(path: String, out: Array, depth: int) -> void:
 		fname = dir.get_next()
 	dir.list_dir_end()
 
+# ─── POOL DE INSTANCIAS BINBUN ──────────────────────────────────────────────────
+# sc.instantiate() de un VFX con GPUParticles + trails cuesta cientos de nodos, y
+# antes se instanciaba uno por explosion (con su Timer propio). Se reutilizan
+# instancias ocultas; el techo es solo un seguro para oleadas con muchas muertes
+# simultaneas (mismo techo visual, costo de GPU acotado).
+const VFX_CAP_GROUND: int = 8
+const VFX_CAP_AIR: int = 8
+const VFX_CAP_NUKE: int = 3
+const VFX_CAP_MUZZLE: int = 10
+
+var _vfx_free: Dictionary = {}   # PackedScene -> Array[Node3D] ocultos y listos
+var _vfx_busy: Array = []        # [Node3D, segundos_restantes, PackedScene]
+
+func _vfx_cap(sc: PackedScene) -> int:
+	if sc == _vfx_exp_nuke:
+		return VFX_CAP_NUKE
+	if sc == _vfx_exp_air:
+		return VFX_CAP_AIR
+	if sc == _vfx_exp_ground:
+		return VFX_CAP_GROUND
+	return VFX_CAP_MUZZLE
+
+func _vfx_take(sc: PackedScene) -> Node3D:
+	var arr: Array = []
+	if _vfx_free.has(sc):
+		arr = _vfx_free[sc]
+	if not arr.is_empty():
+		var fn: Node3D = arr.pop_back()
+		fn.visible = true
+		return fn
+	var live: int = 0
+	for e in _vfx_busy:
+		if e[2] == sc:
+			live += 1
+	if live >= _vfx_cap(sc):
+		# Techo alcanzado: se roba la instancia mas avanzada de ESA escena.
+		var bi: int = -1
+		var best: float = 1e20
+		for i in _vfx_busy.size():
+			if _vfx_busy[i][2] == sc and float(_vfx_busy[i][1]) < best:
+				best = float(_vfx_busy[i][1])
+				bi = i
+		if bi >= 0:
+			var bn: Node3D = _vfx_busy[bi][0]
+			_vfx_busy.remove_at(bi)
+			bn.visible = true
+			return bn
+	var nn: Node3D = sc.instantiate()
+	nn.name = "Vfx_%d" % _vfx_busy.size()
+	if _fx != null:
+		_fx.add_child(nn)  # viven bajo el pool: los limpiezas por nombre no las tocan
+	else:
+		add_child(nn)
+	return nn
+
+func _vfx_start(n: Node3D, life: float, sc: PackedScene) -> void:
+	_vfx_busy.append([n, life, sc])
+
+func _vfx_tick(delta: float) -> void:
+	for i in range(_vfx_busy.size() - 1, -1, -1):
+		var e: Array = _vfx_busy[i]
+		e[1] = float(e[1]) - delta
+		if e[1] > 0.0:
+			continue
+		var n: Node3D = e[0]
+		if is_instance_valid(n):
+			n.visible = false
+			var ap: AnimationPlayer = n.get_node_or_null("AnimationPlayer") as AnimationPlayer
+			if ap != null:
+				ap.stop()
+			var arr2: Array = []
+			if _vfx_free.has(e[2]):
+				arr2 = _vfx_free[e[2]]
+			else:
+				_vfx_free[e[2]] = arr2
+			arr2.append(n)
+		_vfx_busy.remove_at(i)
+
+func _vfx_release_all() -> void:
+	_vfx_tick(100000.0)  # expira todo y devuelve las instancias al pool
+
+
 func _spawn_binbun_explosion(pos: Vector3, scl: float, tier: int) -> bool:
 	_load_binbun_vfx()
 	var sc: PackedScene
@@ -6731,43 +6944,27 @@ func _spawn_binbun_explosion(pos: Vector3, scl: float, tier: int) -> bool:
 		sc = _vfx_exp_ground
 	if sc == null:
 		return false
-	var n: Node3D = sc.instantiate()
-	n.name = "FX_E%d" % (Time.get_ticks_msec() % 100000000)
+	var n: Node3D = _vfx_take(sc)
 	n.position = pos
 	n.scale = Vector3.ONE * clampf(scl, 0.7, 2.4)
-	add_child(n)
-	_active_vfx.append(n)
 	_play_vfx(n)
-	var t := Timer.new()
-	t.one_shot = true
-	t.wait_time = 4.5
-	n.add_child(t)
-	t.timeout.connect(n.queue_free)
-	t.start()
+	_vfx_start(n, 4.5, sc)
 	return true
 
 func _spawn_binbun_muzzle(world_pos: Vector3, dir: Vector3) -> bool:
 	_load_binbun_vfx()
 	if _vfx_muzzle == null:
 		return false
-	var n: Node3D = _vfx_muzzle.instantiate()
+	var n: Node3D = _vfx_take(_vfx_muzzle)
 	var d: Vector3 = dir
 	if d.length() < 0.001:
 		d = Vector3(0.0, 0.0, -1.0)
 	d = d.normalized()
 	# Alinea el destello a la direcciÃ³n del disparo (asume +Z como frente)
-	n.name = "FX_M%d" % (Time.get_ticks_msec() % 100000000)
 	n.position = world_pos
 	n.look_at(world_pos + d, Vector3.UP)
-	add_child(n)
-	_active_vfx.append(n)
 	_play_vfx(n)
-	var t := Timer.new()
-	t.one_shot = true
-	t.wait_time = 1.2
-	n.add_child(t)
-	t.timeout.connect(n.queue_free)
-	t.start()
+	_vfx_start(n, 1.2, _vfx_muzzle)
 	return true
 
 func _play_vfx(n: Node3D) -> void:
@@ -6811,60 +7008,30 @@ func _big_boom(pos: Vector3, scl: float, color: Color, sound: bool, vol_db: floa
 		_explode(pos, int(14 * scl), color)
 		_smoke_burst(pos, int(9 * scl))
 
+# El "globo" del destello (esfera que se expande en la boca del cano) se ve como una
+# pelota gigante cuando el FPS baja: APAGADO por pedido del usuario. Queda la luz del
+# destello y las chispas, que es lo que se lee como disparo. Volver con true.
+const MUZZLE_FLASH_BALL: bool = false
+
 func _muzzle_flash(world_pos: Vector3, dir: Vector3, big: bool) -> void:
 	# Destello Binbun (si estÃ¡ presente) como visual principal
 	if _spawn_binbun_muzzle(world_pos, dir):
 		return
 	var s: float = 1.7 if big else 1.0
 	var warm := Color(1.0, 0.85, 0.4)
-	# Destello brillante (se expande y desvanece)
-	var fl := MeshInstance3D.new()
-	var fm := SphereMesh.new()
-	fm.radius = 0.16 * s
-	fm.height = 0.34 * s
-	var fmat := StandardMaterial3D.new()
-	fmat.albedo_color = Color(1.0, 0.9, 0.5, 0.95)
-	fmat.emission_enabled = true
-	fmat.emission = warm
-	fmat.emission_energy_multiplier = 8.0
-	fmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	fl.mesh = fm
-	fl.material_override = fmat
-	fl.position = world_pos
-	add_child(fl)
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(fl, "scale", Vector3.ONE * (1.9 * s), 0.07)
-	tw.tween_property(fmat, "albedo_color:a", 0.0, 0.08)
-	tw.chain().tween_callback(fl.queue_free)
+	# Destello brillante (se expande y desvanece). Misma geometria (r 0.16*s, h 0.34*s),
+	# misma expansion hasta 1.9*s en 0.07 s y mismo fade 0.95 -> 0 en 0.08 s.
+	if MUZZLE_FLASH_BALL:
+		var s0 := Vector3(0.16 * s, 0.17 * s, 0.16 * s)
+		_fx.add_flash(world_pos, false, s0, s0 * (1.9 * s), Color(1.0, 0.9, 0.5), 8.0, true, 0.95, 0.07, 0.08, warm)
 	# Luz puntual que ilumina el entorno un instante
-	_flash_light(world_pos, warm, (16.0 if big else 8.0) * s, (11.0 if big else 6.0) * s, 0.12)
+	_fx.add_light(world_pos, warm, (16.0 if big else 8.0) * s, (11.0 if big else 6.0) * s, 0.12)
 	# Chispas saliendo por la boca del caÃ±Ã³n
 	var n := int((9 if big else 5) * particle_scale)
 	for i in n:
-		var sp := MeshInstance3D.new()
-		var spm := SphereMesh.new()
 		var r := randf_range(0.02, 0.05)
-		spm.radius = r
-		spm.height = r * 2
-		sp.mesh = spm
-		var smat := StandardMaterial3D.new()
-		smat.albedo_color = Color(1.0, 0.8, 0.4, 0.9)
-		smat.emission_enabled = true
-		smat.emission = Color(1.0, 0.7, 0.3)
-		smat.emission_energy_multiplier = 6.0
-		smat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		sp.material_override = smat
-		sp.position = world_pos
-		add_child(sp)
-		sp.add_to_group("DynNodes")
 		var spd := dir + Vector3(randf_range(-0.3, 0.3), randf_range(-0.3, 0.3), randf_range(-0.3, 0.3)).normalized()
-		particles_list.append({
-			"node": sp,
-			"vel": spd * randf_range(10.0, 22.0),
-			"life": randf_range(0.14, 0.32), "grav": 3.0, "base_alpha": 1.0, "fade": 0.28
-		})
+		_fx.add_particle(world_pos, spd * randf_range(10.0, 22.0), randf_range(0.14, 0.32), 3.0, r, r * 2.0, Color(1.0, 0.8, 0.4), 6.0, false, 1.0, 0.28, Color(1.0, 0.7, 0.3))
 
 func _create_missile() -> Node3D:
 	# Misil / cohete (cuerpo + nariz cÃ³nica + aletas). Autocontenido, orientado a -Z.
@@ -6931,35 +7098,24 @@ func _create_missile() -> Node3D:
 	root.add_child(flame)
 	return root
 
-func _explode(pos: Vector3, count: int, color: Color) -> void:
+func _explode(pos: Vector3, count: int, color: Color, sz: float = 1.0) -> void:
 	count = maxi(1, int(count * particle_scale))
 	for i in count:
-		var p := MeshInstance3D.new()
-		var pm := SphereMesh.new()
-		var r := randf_range(0.1, 0.5)
-		pm.radius = r
-		pm.height = r * 2
-		p.mesh = pm
-		var mat := StandardMaterial3D.new()
+		# Mismo orden de randf() y mismos valores que antes (chispas de impacto,
+		# escombros y fallback de boom). Lo unico que cambia es de donde sale el nodo.
+		# sz achica el efecto completo (radio y altura van juntos): lo usan las chispas
+		# de impacto; los booms llaman sin sz y quedan exactos como antes.
+		var r := randf_range(0.1, 0.5) * sz
 		var c: Color = color
 		if randf() > 0.5:
 			c = Color(1, 0.9, 0.5)
 		elif randf() > 0.5:
 			c = Color(1, 0.4, 0.1)
-		mat.albedo_color = c
-		mat.emission_enabled = true
-		mat.emission = c
-		mat.emission_energy_multiplier = randf_range(3.0, 8.0)
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		p.material_override = mat
-		p.position = pos + Vector3(randf_range(-0.5, 0.5), randf_range(0, 1), randf_range(-0.5, 0.5))
-		add_child(p)
-		p.add_to_group("DynNodes")
-		particles_list.append({
-			"node": p,
-			"vel": Vector3(randf_range(-8, 8), randf_range(2, 12), randf_range(-8, 8)),
-			"life": randf_range(0.6, 2.0)
-		})
+		var em := randf_range(3.0, 8.0)
+		var ppos := pos + Vector3(randf_range(-0.5, 0.5), randf_range(0, 1), randf_range(-0.5, 0.5))
+		var pvel := Vector3(randf_range(-8, 8), randf_range(2, 12), randf_range(-8, 8))
+		var plife := randf_range(0.6, 2.0)
+		_fx.add_particle(ppos, pvel, plife, 1.0, r, r * 2.0, c, em, false, 1.0, 1.0)
 
 # â”€â”€â”€ SUPPLY CRATES â”€â”€â”€
 func _update_crates(delta: float) -> void:

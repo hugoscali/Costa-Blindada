@@ -75,6 +75,7 @@ func set_crosshair_mode(split: bool) -> void:
 	layout_crosshairs()
 
 func build_hud() -> void:
+	_hud_reset_cache()  # nodos nuevos: la cache de busquedas y la firma arrancan de cero
 	app.hud = CanvasLayer.new()
 	app.hud.layer = 10
 	app.add_child(app.hud)
@@ -562,17 +563,72 @@ func make_button(p_name: String, p_pos: Vector2, p_text: String, p_cb: Callable,
 	return btn
 
 # ─── HUD UPDATE ───
+# --- Actualización barata del HUD ------------------------------------------------
+# Antes el HUD se rehecía COMPLETO cada frame: ~15 búsquedas de nodo por nombre,
+# ~10 textos re-asignados (cada uno invalida y vuelve a maquetar su Label) y
+# varias llamadas a _tr(). Medido en juego: 1,0-1,8 ms del loop principal.
+# Ahora los nodos se cachean y el cuerpo solo se recorre cuando cambió algún valor
+# que se muestra, o cada 12 frames como máximo (0,1 s a 100 FPS).
+var _hud_nodes: Dictionary = {}
+var _hud_missing: Dictionary = {}
+var _hud_sig: String = ""
+var _hud_frames: int = 0
+var _hud_tick: int = 0  # contador monotonico: se usa para re-mirar un Label que faltaba
+
+
+# Nodo del HUD cacheado. Si no existe se recuerda que no existe, pero se vuelve a
+# mirar cada 60 frames por si aparecio despues (clusters split, menus, game over).
+func _hud_node(nm: String) -> Node:
+	if _hud_missing.has(nm):
+		if _hud_tick - int(_hud_missing[nm]) < 60:
+			return null
+		_hud_missing.erase(nm)
+	var cached: Variant = _hud_nodes.get(nm, null)
+	if cached != null and is_instance_valid(cached):
+		return cached as Node
+	var found: Node = app.hud.get_node_or_null(nm)
+	if found == null:
+		_hud_missing[nm] = _hud_tick
+		return null
+	_hud_nodes[nm] = found
+	return found
+
+
+func _hud_reset_cache() -> void:
+	_hud_nodes.clear()
+	_hud_missing.clear()
+	_hud_sig = ""
+	_hud_frames = 999  # fuerza la primera actualización después de armar el HUD
+
+
 func update_hud() -> void:
+	# Firma de todo lo que el HUD muestra. Si no cambió nada, ningún Label se toca.
+	_hud_tick += 1
+	_hud_frames += 1
+	var sig: String = "%d|%d|%d|%d|%d|%d|%d|%d|%d" % [
+		int(round(app.health * 4.0)), int(app.score), int(app.wave), int(app.combat_pts),
+		int(app.current_weapon), int(app.ammo[1]), int(app.ammo[2]), int(app.lang),
+		(1 if app.music_enabled else 0),
+	]
+	if app.split_mode and app.slot_states.size() > 1:
+		for stx in app.slot_states:
+			var sdx: Dictionary = stx
+			var amx: Array = sdx.get("ammo", [0, 0, 0])
+			sig += "|%d|%d|%d" % [int(sdx.get("score", 0)), int(sdx.get("weapon", 0)), int(amx[1])]
+	if _hud_frames < 12 and sig == _hud_sig:
+		return
+	_hud_frames = 0
+	_hud_sig = sig
 	var hp_bar: ProgressBar = app.hud.get_child(0) as ProgressBar
 	if hp_bar:
 		hp_bar.value = maxf(0, app.health)
-	var vida_label: Label = app.hud.get_node_or_null("VidaLabel") as Label
+	var vida_label: Label = _hud_node("VidaLabel") as Label
 	if vida_label:
 		vida_label.text = "%s: %d%%" % [app._tr("hud_vida"), int(ceilf(clampf(app.health / app.base_hp_max, 0.0, 1.0) * 100.0))]
 	# Score: single = score global; split = puntuación individual de cada jugador
 	# (slot 0 = mitad izq. / slot 1 = mitad der., acreditada por kill_credit_slot)
-	var score_label: Label = app.hud.get_node_or_null("ScoreLabel") as Label
-	var score1_label: Label = app.hud.get_node_or_null("ScoreLabelP1") as Label
+	var score_label: Label = _hud_node("ScoreLabel") as Label
+	var score1_label: Label = _hud_node("ScoreLabelP1") as Label
 	if app.split_mode and app.mp_role == 3 and app.slot_states.size() > 1:
 		if score1_label:
 			score1_label.text = "%d" % int(app.slot_states[0].get("score", 0))
@@ -580,20 +636,20 @@ func update_hud() -> void:
 			score_label.text = "%d" % int(app.slot_states[1].get("score", 0))
 	elif score_label:
 		score_label.text = "%d" % app.score
-	var wave_label: Label = app.hud.get_node_or_null("WaveLabel") as Label
+	var wave_label: Label = _hud_node("WaveLabel") as Label
 	if wave_label:
 		wave_label.text = "%s %d" % [app._tr("wave_word"), app.wave]
-	var wave1_label: Label = app.hud.get_node_or_null("WaveLabelP1") as Label
+	var wave1_label: Label = _hud_node("WaveLabelP1") as Label
 	if wave1_label:
 		wave1_label.text = "%s %d" % [app._tr("wave_word"), app.wave]
-	var ammo_label: Label = app.hud.get_node_or_null("AmmoLabel") as Label
+	var ammo_label: Label = _hud_node("AmmoLabel") as Label
 	if ammo_label:
 		var wname: String = app._tr("wpn%d" % app.current_weapon)
 		var wammo: String = "∞" if app.current_weapon == 0 else str(app.ammo[app.current_weapon])
 		ammo_label.text = "%s: %s" % [wname, wammo]
 	# Caja de arma visible (abajo-derecha): actualización en tiempo real cada frame
 	# Split 2P: derecha = P2 (gamepad) · izquierda = P1 (mouse)
-	var wpn_lbl: Label = app.hud.get_node_or_null("WeaponIndicator/WeaponLabel") as Label
+	var wpn_lbl: Label = _hud_node("WeaponIndicator/WeaponLabel") as Label
 	if wpn_lbl:
 		if app.split_mode and app.mp_role == 3 and app.slot_states.size() > 1:
 			var st1: Dictionary = app.slot_states[1]
@@ -608,24 +664,24 @@ func update_hud() -> void:
 			var wtext := "  %s: %s  " % [wname_v, wammo_v]
 			if wpn_lbl.text != wtext:
 				wpn_lbl.text = wtext
-	var wpn1_lbl: Label = app.hud.get_node_or_null("WeaponIndicatorP1/WeaponLabel") as Label
+	var wpn1_lbl: Label = _hud_node("WeaponIndicatorP1/WeaponLabel") as Label
 	if wpn1_lbl and app.split_mode and app.mp_role == 3:
 		var w1name: String = app._tr("wpn%d" % app.current_weapon)
 		var w1ammo: String = "∞" if app.current_weapon == 0 else str(app.ammo[app.current_weapon])
 		var w1text := "  %s: %s  " % [w1name, w1ammo]
 		if wpn1_lbl.text != w1text:
 			wpn1_lbl.text = w1text
-	var pts_label: Label = app.hud.get_node_or_null("PtsLabel") as Label
+	var pts_label: Label = _hud_node("PtsLabel") as Label
 	if pts_label:
 		pts_label.text = "● %d PTS" % app.combat_pts
-	var pts1_label: Label = app.hud.get_node_or_null("PtsLabelP1") as Label
+	var pts1_label: Label = _hud_node("PtsLabelP1") as Label
 	if pts1_label:
 		pts1_label.text = "● %d PTS" % app.combat_pts  # PTS de habilidades: pool compartido (igual en ambas mitades)
 	# P2 (split): barra de vida + etiqueta Vida (misma base que P1)
-	var hp2: ProgressBar = app.hud.get_node_or_null("HPBarP2") as ProgressBar
+	var hp2: ProgressBar = _hud_node("HPBarP2") as ProgressBar
 	if hp2:
 		hp2.value = maxf(0, app.health)
-	var vida2: Label = app.hud.get_node_or_null("VidaLabelP2") as Label
+	var vida2: Label = _hud_node("VidaLabelP2") as Label
 	if vida2:
 		vida2.text = "%s: %d%%" % [app._tr("hud_vida"), int(ceilf(clampf(app.health / app.base_hp_max, 0.0, 1.0) * 100.0))]
 	# Etiquetas estáticas del HUD: se refrescan por frame para reflejar el idioma activo
@@ -633,10 +689,10 @@ func update_hud() -> void:
 		app.music_label.text = app._music_lbl_text()
 	if app.music_label_p1:
 		app.music_label_p1.text = app._music_lbl_text()
-	var abl_lbl: Label = app.hud.get_node_or_null("AbilityLabel") as Label
+	var abl_lbl: Label = _hud_node("AbilityLabel") as Label
 	if abl_lbl:
 		abl_lbl.text = app._tr("hud_ability") % app._dev_abl_key()
-	var abl_lbl2: Label = app.hud.get_node_or_null("AbilityLabelP2") as Label
+	var abl_lbl2: Label = _hud_node("AbilityLabelP2") as Label
 	if abl_lbl2:
 		abl_lbl2.text = app._tr("hud_ability") % app._dev_abl_key()
 
