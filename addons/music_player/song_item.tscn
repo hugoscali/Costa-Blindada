@@ -1,0 +1,16 @@
+[gd_scene format=3 uid="uid://dw2lh43jvd7kd"]
+
+[ext_resource type="Script" uid="uid://bv37jpuktbrwf" path="res://addons/music_player/song_item.gd" id="1_n4psa"]
+
+[node name="SongItem" type="Button" unique_id=1688898835]
+modulate = Color(0.97158283, 0.16013965, 0.99999994, 1)
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 73.0
+grow_horizontal = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+text = "Click to play song"
+script = ExtResource("1_n4psa")
+
+[connection signal="pressed" from="." to="." method="_on_pressed"]

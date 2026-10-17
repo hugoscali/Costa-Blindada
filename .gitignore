@@ -1,0 +1,9 @@
+# Godot 4 cache/imports — no va al repositorio
+.godot/
+
+# Exportes locales (el juego se publica como Release, no como archivo del repo)
+export/
+
+# Temporales
+*.tmp
+*.bak

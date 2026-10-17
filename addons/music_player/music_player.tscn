@@ -1,0 +1,203 @@
+[gd_scene format=3 uid="uid://p0ddxj8tra86"]
+
+[ext_resource type="Script" uid="uid://dljqo6xu6402u" path="res://addons/music_player/music_player.gd" id="1_jrm68"]
+
+[sub_resource type="StyleBoxEmpty" id="StyleBoxEmpty_ptthf"]
+
+[sub_resource type="StyleBoxEmpty" id="StyleBoxEmpty_jrm68"]
+
+[node name="Music Player" type="Control" unique_id=1907988388]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_jrm68")
+
+[node name="MusicPlayer" type="AudioStreamPlayer" parent="." unique_id=244490383]
+unique_name_in_owner = true
+
+[node name="AlwaysActive" type="Control" parent="." unique_id=503698875]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
+
+[node name="ChangeModeButton" type="Button" parent="AlwaysActive" unique_id=308690198]
+unique_name_in_owner = true
+modulate = Color(0, 0.84280014, 3.85046e-07, 1)
+layout_mode = 1
+anchors_preset = -1
+anchor_right = 1.0
+anchor_bottom = 0.025
+offset_bottom = 29.0
+grow_horizontal = 2
+text = "Settings"
+
+[node name="Playing" type="Panel" parent="AlwaysActive" unique_id=1446906515]
+self_modulate = Color(0.5050789, 0.0014707795, 0.69441247, 1)
+custom_minimum_size = Vector2(0, 93.37)
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 0
+
+[node name="Name" type="RichTextLabel" parent="AlwaysActive/Playing" unique_id=2079455751]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_top = 3.369995
+offset_bottom = 26.369995
+grow_horizontal = 2
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 8
+theme_override_styles/normal = SubResource("StyleBoxEmpty_ptthf")
+theme_override_styles/focus = SubResource("StyleBoxEmpty_jrm68")
+bbcode_enabled = true
+text = "[b][rainbow][wave amp=10 freq=4]Epic mega awesome song"
+scroll_active = false
+horizontal_alignment = 1
+
+[node name="Time" type="RichTextLabel" parent="AlwaysActive/Playing" unique_id=1287180423]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_top = 32.570007
+offset_bottom = 55.570007
+grow_horizontal = 2
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 8
+theme_override_styles/normal = SubResource("StyleBoxEmpty_ptthf")
+theme_override_styles/focus = SubResource("StyleBoxEmpty_jrm68")
+bbcode_enabled = true
+text = "[b][rainbow][wave amp=10 freq=4]0:00/0:00"
+scroll_active = false
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="Controls" type="HBoxContainer" parent="AlwaysActive/Playing" unique_id=1081094223]
+layout_mode = 1
+anchors_preset = -1
+anchor_right = 1.0
+anchor_bottom = 0.1
+offset_top = 60.20002
+offset_bottom = 84.72002
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ToggleMusic" type="Button" parent="AlwaysActive/Playing/Controls" unique_id=2109066606]
+modulate = Color(1, 0, 0, 1)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Pause/Unpause"
+
+[node name="Skip" type="Button" parent="AlwaysActive/Playing/Controls" unique_id=592222708]
+modulate = Color(0, 1, 0.627451, 1)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Skip"
+
+[node name="Settings" type="Control" parent="." unique_id=1389542117]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchor_top = 0.15
+anchor_right = 1.0
+anchor_bottom = 0.8
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="Settings" unique_id=802022751]
+layout_mode = 1
+anchors_preset = -1
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ScrollContainer" type="ScrollContainer" parent="Settings/MarginContainer" unique_id=1697552834]
+layout_mode = 2
+
+[node name="SettingList" type="VBoxContainer" parent="Settings/MarginContainer/ScrollContainer" unique_id=1917389391]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="VolumeText" type="Label" parent="Settings/MarginContainer/ScrollContainer/SettingList" unique_id=2043475869]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Volume: 100%"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="VolumeSlider" type="HSlider" parent="Settings/MarginContainer/ScrollContainer/SettingList" unique_id=1820860704]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="ShuffleCheckbox" type="CheckBox" parent="Settings/MarginContainer/ScrollContainer/SettingList" unique_id=2042593662]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Shuffle"
+
+[node name="RefreshSongsButton" type="Button" parent="Settings/MarginContainer/ScrollContainer/SettingList" unique_id=1101256480]
+layout_mode = 2
+text = "Refresh Songs"
+
+[node name="PrintSongFolder" type="Button" parent="Settings/MarginContainer/ScrollContainer/SettingList" unique_id=1384396515]
+layout_mode = 2
+text = "Print Song Folder Location"
+
+[node name="PrintConfigFolder" type="Button" parent="Settings/MarginContainer/ScrollContainer/SettingList" unique_id=1707509553]
+layout_mode = 2
+text = "Print Config Location"
+
+[node name="Main" type="Control" parent="." unique_id=299238700]
+unique_name_in_owner = true
+layout_mode = 1
+anchor_top = 0.15
+anchor_right = 1.0
+anchor_bottom = 0.8
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="Main" unique_id=776052249]
+layout_mode = 1
+anchors_preset = -1
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_bottom = -22.400024
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ScrollContainer" type="ScrollContainer" parent="Main/MarginContainer" unique_id=1493169326]
+layout_mode = 2
+
+[node name="SongsList" type="VBoxContainer" parent="Main/MarginContainer/ScrollContainer" unique_id=1172115552]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="BackToRootButton" type="Button" parent="Main/MarginContainer/ScrollContainer/SongsList" unique_id=2077792053]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+text = "Back To Root"
+
+[connection signal="finished" from="MusicPlayer" to="." method="_on_music_player_finished"]
+[connection signal="pressed" from="AlwaysActive/ChangeModeButton" to="." method="_on_change_mode_button_pressed"]
+[connection signal="pressed" from="AlwaysActive/Playing/Controls/ToggleMusic" to="." method="_on_toggle_music_pressed"]
+[connection signal="pressed" from="AlwaysActive/Playing/Controls/Skip" to="." method="_on_skip_pressed"]
+[connection signal="value_changed" from="Settings/MarginContainer/ScrollContainer/SettingList/VolumeSlider" to="." method="_on_volume_slider_value_changed"]
+[connection signal="pressed" from="Settings/MarginContainer/ScrollContainer/SettingList/ShuffleCheckbox" to="." method="_on_shuffle_pressed"]
+[connection signal="pressed" from="Settings/MarginContainer/ScrollContainer/SettingList/RefreshSongsButton" to="." method="_on_refresh_songs_button_pressed"]
+[connection signal="pressed" from="Settings/MarginContainer/ScrollContainer/SettingList/PrintSongFolder" to="." method="_on_print_song_folder_pressed"]
+[connection signal="pressed" from="Settings/MarginContainer/ScrollContainer/SettingList/PrintConfigFolder" to="." method="_on_print_config_folder_pressed"]
+[connection signal="pressed" from="Main/MarginContainer/ScrollContainer/SongsList/BackToRootButton" to="." method="_on_back_to_root_pressed"]
