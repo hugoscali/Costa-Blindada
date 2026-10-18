@@ -99,7 +99,9 @@ func show() -> void:
 	if player < 0:
 		cb_label.call(_hint_name(), Vector2(640, 850), cb_tr.call("vkb_hint"), 18, Color(1, 1, 1, 0.75))
 	else:
-		cb_centered.call(_hint_name(), 960.0 * player, 830, 960, 30, cb_tr.call("vkb_hint"), 17, Color(1, 1, 1, 0.75))
+		# P1 (mitad izquierda) puede usar el mando O el teclado de PC / el mouse: se le avisa.
+		var hk: String = "vkb_hint_p1" if player == 0 else "vkb_hint"
+		cb_centered.call(_hint_name(), 960.0 * player, 830, 960, 30, cb_tr.call(hk), 17, Color(1, 1, 1, 0.75))
 	render()
 
 func render() -> void:
@@ -159,6 +161,24 @@ func submit() -> void:
 
 func skip() -> void:
 	cb_skip.call()
+
+
+# ─── CLIC (mouse) ────────────────────────────────────────────────────────────────
+# True si el punto cae sobre una tecla de ESTE teclado y la selecciona. Se mide contra
+# el rect real del Label: funciona igual si el HUD está escalado o reubicado.
+func pick_at(pos: Vector2) -> bool:
+	if not open:
+		return false
+	for i in range(COLS * ROWS):
+		var lbl: Label = hud.get_node_or_null(_label_name(i)) as Label
+		if lbl == null or not lbl.visible:
+			continue
+		if lbl.get_global_rect().has_point(pos):
+			cursor = i
+			render()
+			select()
+			return true
+	return false
 
 # Quita todos sus nodos del HUD (quedan libres igual que antes: queue_free diferido)
 func clear() -> void:

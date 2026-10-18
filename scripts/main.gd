@@ -1952,6 +1952,9 @@ func _mp_local_saved(rank: int) -> void:
 		initials_label.queue_free()
 		initials_label = null
 	_mp_rebuild_ranking()  # ahora con todas las iniciales + MVP real
+	if _svkb.size() == 2:
+		_svkb[0].clear()  # los 2 VKB del split quedan limpios: si uno queda "open" el
+		_svkb[1].clear()  # proximo game over muestra un teclado demas o bloquea una mitad
 	_vkb.clear()  # por seguridad: ningÃºn teclado virtual sigue visible tras guardar
 	var hint: Label = hud.get_node_or_null("GOHint") as Label
 	if hint == null:
@@ -4766,6 +4769,21 @@ func _input(event: InputEvent) -> void:
 		else:
 			_joy_menu_nav(event as InputEventJoypadButton)
 		return
+	# ── GAME OVER: clic sobre una letra del teclado virtual ──
+	# En split cada mitad tiene el suyo; la letra se elige con el mouse sin tocar el mando.
+	# No interfiere con el disparo: en GAMEOVER el mouse ya no apunta (esta rama es exclusiva).
+	if phase == GamePhase.GAMEOVER and entering_initials and event is InputEventMouseButton:
+		var mbk := event as InputEventMouseButton
+		if mbk.pressed and mbk.button_index == MOUSE_BUTTON_LEFT:
+			var hit: bool = false
+			if split_mode:
+				if _svkb.size() == 2:
+					hit = _svkb[0].pick_at(mbk.position) or _svkb[1].pick_at(mbk.position)
+			elif _vkb != null:
+				hit = _vkb.pick_at(mbk.position)
+			if hit:
+				get_viewport().set_input_as_handled()
+				return
 	if event is InputEventKey and event.pressed:
 		var key := event as InputEventKey
 		var kc := int(key.keycode)  # comparo como int (evita el cast de enum)
@@ -4806,9 +4824,9 @@ func _input(event: InputEvent) -> void:
 			elif kc == _kb("music"): _toggle_music()
 		elif phase == GamePhase.GAMEOVER:
 			if entering_initials:
-				# En split, el teclado de PC solo lo usa P1 si eligiÃ³ teclado/mouse
-				if not split_mode or local_input_mode == 0:
-					_handle_initials_key(key)
+				# El teclado de PC SIEMPRE puede editar las iniciales de P1 (en split es lo unico
+				# que tiene P1 si no tiene mando, y convive con el mando de P2 sin pelearse).
+				_handle_initials_key(key)
 			else:
 				if kc == _kb("restart") and mp_role == 0:
 					_restart_game()
