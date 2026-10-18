@@ -67,6 +67,73 @@ func _init() -> void:
 	if c2 != null:
 		check(c2.get_parent() == main.vp_b, "copia B padre == vp_b")
 
+	# ── VFX en las dos mitades (fix: en split no explotaba nada) ──
+	check(main._fx_a != null and main._fx_b != null, "pools de VFX creados para cada mitad")
+	check(main._fx.mirror_count() == 2, "_fx tiene 2 pools espejo")
+	if main._fx_a != null and main._fx_b != null:
+		check(main._fx_a.get_parent() == main.vp_a, "pool A vive dentro de vp_a")
+		check(main._fx_b.get_parent() == main.vp_b, "pool B vive dentro de vp_b")
+	main._explode(Vector3(0.0, 2.0, -30.0), 14, Color(1.0, 0.6, 0.2))
+	main._shockwave_ring(Vector3(0.0, 2.0, -30.0), Color(1.0, 0.6, 0.2), 1.0)
+	main._flash_light(Vector3(0.0, 2.0, -30.0), Color(1.0, 0.8, 0.4), 10.0, 12.0, 0.3)
+	await process_frame
+	var pa: Array = main._fx_a.debug_positions()
+	var pb: Array = main._fx_b.debug_positions()
+	check(pa.size() > 0 and pa.size() == pb.size(), "las particulas existen en AMBAS mitades (A=%d B=%d)" % [pa.size(), pb.size()])
+	check(int(main._fx.stats().get("parts", -1)) == 0, "el arbol principal no crea VFX extra en split (sin triple costo)")
+	var la: Array = main._fx_a.debug_light_energies()
+	var lb: Array = main._fx_b.debug_light_energies()
+	check(la.size() == 1 and lb.size() == 1, "luz de destello en ambas mitades (A=%d B=%d)" % [la.size(), lb.size()])
+	var moved := false
+	if pa.size() > 0:
+		await process_frame
+		var pa2: Array = main._fx_a.debug_positions()
+		if pa2.size() == pa.size():
+			for i in pa2.size():
+				if pa2[i] != pa[i]:
+					moved = true
+					break
+	check(moved, "las particulas espejadas se integran (tick cascadea a las mitades)")
+
+	# ── Explosiones Binbun: instancia propia en cada mitad ──
+	main._big_boom(Vector3(10.0, 1.0, -25.0), 1.0, Color(1.0, 0.7, 0.3), false)
+	await process_frame
+	var busy_bb: int = main._vfx_busy.size()
+	var cps: int = 0
+	var vis_copies: int = 0
+	for k in main._vfx_copies:
+		for c in main._vfx_copies[k]:
+			cps += 1
+			if c != null and is_instance_valid(c) and (c as Node3D).visible:
+				vis_copies += 1
+	check(busy_bb >= 1, "explosion Binbun en juego (%d)" % busy_bb)
+	check(cps == 2 * busy_bb, "cada explosion Binbun tiene copia en cada mitad (%d copias / %d efectos)" % [cps, busy_bb])
+	check(vis_copies == cps and cps > 0, "las copias estan visibles")
+	var in_vp: int = 0
+	for k in main._vfx_copies:
+		for c in main._vfx_copies[k]:
+			if c != null and is_instance_valid(c) and c.get_parent() in [main._fx_a, main._fx_b]:
+				in_vp += 1
+	check(in_vp == cps, "cada copia cuelga del pool de su mitad (dentro del viewport), no del arbol principal")
+
+	# ── Helice del helicoptero en las dos mitades ──
+	main._spawn_plane_from_warship()
+	await process_frame
+	await process_frame
+	var heli_mi: Dictionary = main._mirrors[main._mirrors.size() - 1]
+	var spins: Array = heli_mi.get("spins", [])
+	check(spins.size() == 2, "las 2 helices quedan registradas como nodos a espejar (%d)" % spins.size())
+	if spins.size() == 2:
+		var r_o: Node3D = spins[0]["o"]
+		var r_a: Node3D = spins[0]["c1"]
+		var r_b: Node3D = spins[0]["c2"]
+		var r0: float = r_a.rotation.y
+		await process_frame
+		await process_frame
+		check(absf(r_o.rotation.y - r0) > 0.01, "la helice original gira (%.3f -> %.3f)" % [r0, r_o.rotation.y])
+		check(absf(r_a.rotation.y - r0) > 0.01, "la helice gira en la mitad A (%.3f -> %.3f)" % [r0, r_a.rotation.y])
+		check(absf(r_b.rotation.y - r_o.rotation.y) < 0.05, "la helice de la mitad B sincronizada con la original")
+
 	# ── Disparo J2 (slot 1, estacion +22) ──
 	main.slot_states[1].aim = [0.0, 0.0]
 	main.slot_states[1].weapon = 1
@@ -143,6 +210,11 @@ func _init() -> void:
 	await process_frame
 	check(main.split_mode == false, "split_mode desactivado")
 	check(main.vp_a == null and main.vp_b == null, "viewports liberados")
+	check(main._fx_a == null and main._fx_b == null, "pools de VFX del split liberados")
+	check(main._fx.mirror_count() == 0, "espejos de VFX cortados al salir de split")
+	check(main._vfx_free_m.is_empty() and main._vfx_copies.is_empty(), "sin instancias espejadas colgando")
+	main._explode(Vector3(0.0, 2.0, -30.0), 10, Color(1.0, 1.0, 1.0))
+	check(int(main._fx.stats().get("parts", 0)) > 0, "de vuelta en single, el pool principal vuelve a crear su propio VFX")
 	check(main.world.visible == true, "mundo restaurado visible")
 	check(main.camera.current == true, "camara principal restaurada")
 	check((main.hud.get_node_or_null("WeaponIndicatorP1") as Node).visible == false, "WeaponIndicatorP1 oculta")

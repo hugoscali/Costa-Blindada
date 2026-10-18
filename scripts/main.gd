@@ -575,6 +575,13 @@ func _split_hide_own_avatar() -> void:
 var gun_a: Node3D = null  # split: viewmodel de arma del J1
 var gun_b: Node3D = null  # split: viewmodel de arma del J2
 var p2_btn_prev: Dictionary = {}  # split: edge detection de botones J2
+var _fx_a: FxPool = null  # split: pool de VFX de la mitad IZQUIERDA (espejo de _fx)
+var _fx_b: FxPool = null  # split: pool de VFX de la mitad DERECHA
+
+# Sub-nodos que el juego rota por codigo (helices del helicoptero). El espejo de split
+# iguala el nodo raiz del enemigo; si la helice no se copia tambien, el helicoptero vuela
+# por las dos mitades con la helice quieta.
+const SPLIT_SPIN_NODES: Array[String] = ["MainRotor", "TailRotor"]
 
 # IntercepciÃ³n (polling por frame): un nodo 3D dinÃ¡mico nuevo en la raÃ­z â†’
 # copia visible espejada en los 2 viewports
@@ -586,7 +593,9 @@ func _split_has_mirror(orig: Node) -> bool:
 
 func _split_scan_new_nodes() -> void:
 	for ch in get_children():
-		if ch is Node3D and ch is not Camera3D and ch != world and not _split_has_mirror(ch):
+		# FxPool queda afuera: tiene su propio mecanismo de espejos (_fx_a / _fx_b).
+		# Espejarlo aca dejaba una foto congelada de las particulas en cada mitad.
+		if ch is Node3D and ch is not Camera3D and ch != world and not (ch is FxPool) and not _split_has_mirror(ch):
 			_register_split_mirror(ch)
 
 func _register_split_mirror(orig: Node3D) -> void:
@@ -601,8 +610,29 @@ func _register_split_mirror(orig: Node3D) -> void:
 		"ap_o": orig.get_node_or_null("AnimationPlayer") as AnimationPlayer,
 		"ap1": c1.get_node_or_null("AnimationPlayer") as AnimationPlayer if c1 != null else null,
 		"ap2": c2.get_node_or_null("AnimationPlayer") as AnimationPlayer if c2 != null else null,
-		"has_rifle": orig.get_node_or_null("Rifle") != null
+		"has_rifle": orig.get_node_or_null("Rifle") != null,
+		"spins": _split_collect_spins(orig, c1, c2)
 	})
+
+
+# Pares (original, copia) de los sub-nodos animados por codigo (helices). Se resuelven
+# al registrar el espejo: buscarlos por nombre cada frame sale caro y no hace falta.
+func _split_collect_spins(orig: Node3D, c1: Node3D, c2: Node3D) -> Array:
+	var out: Array = []
+	for nm in SPLIT_SPIN_NODES:
+		var so: Node3D = orig.get_node_or_null(nm) as Node3D
+		if so == null:
+			continue
+		var s1: Node3D = null
+		var s2: Node3D = null
+		if c1 != null:
+			s1 = c1.get_node_or_null(nm) as Node3D
+		if c2 != null:
+			s2 = c2.get_node_or_null(nm) as Node3D
+		if s1 == null and s2 == null:
+			continue
+		out.append({"o": so, "c1": s1, "c2": s2})
+	return out
 
 func _split_clone_into(orig: Node3D, vp: SubViewport) -> Node3D:
 	if vp == null:
@@ -661,6 +691,21 @@ func _update_split_mirrors() -> void:
 		var orig := orig_v as Node3D
 		_sync_split_copy(mi, orig, "c1", "ap1")
 		_sync_split_copy(mi, orig, "c2", "ap2")
+		# Sub-nodos animados por codigo (helices): el raiz del espejo ya se igualo arriba,
+		# falta la rotacion local de cada helice. Son 2 nodos por helicoptero, no por frame
+		# de cada enemigo.
+		for sp in mi.get("spins", []):
+			var so: Node3D = sp["o"]
+			if so == null or not is_instance_valid(so):
+				continue
+			for ck in ["c1", "c2"]:
+				var cv: Variant = sp[ck]
+				if cv == null or not is_instance_valid(cv):
+					continue
+				var cn := cv as Node3D
+				cn.position = so.position
+				cn.rotation = so.rotation
+				cn.scale = so.scale
 	for mi in to_prune:
 		var c1v: Variant = mi["c1"]
 		if c1v != null and is_instance_valid(c1v):
@@ -802,6 +847,9 @@ func _build_split_viewports() -> void:
 	vp_b.add_child(cam_b)
 	_split_assign_camera(vp_b, cam_b)
 	gun_b = _split_clone_gun(vp_b)
+	# VFX: el arbol principal no se renderiza en split, así que cada mitad necesita su
+	# propio pool. Sin esto, en 2P local no explota nada ni se ve el destello del cañón.
+	_split_build_fx_pools()
 	# El raiz pasa a ser solo compositor 2D de las dos mitades: apagar su upscale 3D.
 	_root_scaling_for_split()
 	# â”€â”€ Display: 2 TextureRect (mitad de pantalla) sobre el canvas principal â”€â”€
@@ -812,6 +860,26 @@ func _build_split_viewports() -> void:
 	tex_a = _split_make_tex(vp_a, "A")
 	tex_b = _split_make_tex(vp_b, "B")
 	_update_split_viewport_sizes()
+
+# Los dos pools espejo viven DENTRO de cada SubViewport: ahi es donde se renderiza.
+# _fx queda como despachador (FxPool no crea nada propio cuando tiene espejos), así el
+# split cuesta dos mitades y no tres.
+func _split_build_fx_pools() -> void:
+	if _fx == null or vp_a == null or vp_b == null:
+		return
+	_fx_a = FxPool.new()
+	_fx_a.name = "FxPoolA"
+	vp_a.add_child(_fx_a)
+	_fx_b = FxPool.new()
+	_fx_b.name = "FxPoolB"
+	vp_b.add_child(_fx_b)
+	_fx.clear_mirrors()
+	_fx.add_mirror(_fx_a)
+	_fx.add_mirror(_fx_b)
+	# Las explosiones Binbun (instancias de escena) tambien necesitan su copia en cada
+	# mitad: un free-list por pool, con el mismo indice que los espejos (0 = A, 1 = B).
+	_vfx_free_m = [{}, {}]
+
 
 func _split_make_tex(vp: SubViewport, tag: String) -> TextureRect:
 	var tex := TextureRect.new()  # "tex" (no "tr": esa variable shadowea a Object.tr)
@@ -1310,6 +1378,18 @@ func _teardown_split() -> void:
 	split_mode = false
 	_mirrors.clear()
 	p2_btn_prev.clear()
+	# VFX del split: liberar los pools de cada mitad y cortar los espejos. Si quedaran
+	# espejos apuntando a pools muertos, el siguiente disparo escribiria en el vacio.
+	for fxp in [_fx_a, _fx_b]:
+		if fxp != null and is_instance_valid(fxp):
+			fxp.release_all()
+			fxp.queue_free()
+	_fx_a = null
+	_fx_b = null
+	if _fx != null:
+		_fx.clear_mirrors()
+	_vfx_free_m = []
+	_vfx_copies.clear()
 	for vp in [vp_a, vp_b]:
 		if vp != null and is_instance_valid(vp):
 			(vp as Node).queue_free()
@@ -6863,6 +6943,8 @@ const VFX_CAP_MUZZLE: int = 10
 
 var _vfx_free: Dictionary = {}   # PackedScene -> Array[Node3D] ocultos y listos
 var _vfx_busy: Array = []        # [Node3D, segundos_restantes, PackedScene]
+var _vfx_free_m: Array = []      # split: un Dictionary por pool espejo (0 = A, 1 = B)
+var _vfx_copies: Dictionary = {} # split: instancia principal -> Array[Node3D], una por mitad
 
 func _vfx_cap(sc: PackedScene) -> int:
 	if sc == _vfx_exp_nuke:
@@ -6874,6 +6956,13 @@ func _vfx_cap(sc: PackedScene) -> int:
 	return VFX_CAP_MUZZLE
 
 func _vfx_take(sc: PackedScene) -> Node3D:
+	var n: Node3D = _vfx_take_one(sc)
+	if n != null:
+		_vfx_ensure_copies(n, sc)  # split: una copia del efecto por cada mitad
+	return n
+
+
+func _vfx_take_one(sc: PackedScene) -> Node3D:
 	var arr: Array = []
 	if _vfx_free.has(sc):
 		arr = _vfx_free[sc]
@@ -6906,6 +6995,74 @@ func _vfx_take(sc: PackedScene) -> Node3D:
 		add_child(nn)
 	return nn
 
+
+# Split: cada efecto Binbun necesita SU instancia dentro de cada mitad (los dos mundos
+# son separados). Se reusa el free-list de esa mitad; si esta vacio se instancia una vez
+# y se queda en el pool de esa mitad para toda la partida (los fogonazos van uno por
+# disparo: instanciarlos cada vez cortaria el frame).
+func _vfx_ensure_copies(n: Node3D, sc: PackedScene) -> void:
+	if _vfx_free_m.is_empty() or _fx_a == null or _fx_b == null:
+		return
+	if not (is_instance_valid(_fx_a) and is_instance_valid(_fx_b)):
+		return
+	var pools: Array = [_fx_a, _fx_b]
+	var cps: Array = []
+	if _vfx_copies.has(n):
+		cps = _vfx_copies[n]
+	for i in pools.size():
+		var cn: Node3D = null
+		if i < cps.size():
+			cn = cps[i]
+		if cn != null and is_instance_valid(cn):
+			continue
+		var fl: Array = _vfx_free_m[i].get(sc, [])
+		if not fl.is_empty():
+			cn = fl.pop_back()
+			cn.visible = true
+		else:
+			cn = sc.instantiate() as Node3D
+			if cn == null:
+				continue
+			cn.name = "VfxM%d" % (i + 1)
+			pools[i].add_child(cn)
+		while cps.size() < i:
+			cps.append(null)
+		if cps.size() > i:
+			cps[i] = cn
+		else:
+			cps.append(cn)
+	_vfx_copies[n] = cps
+
+
+func _vfx_copies_of(n: Node3D) -> Array:
+	var out: Array = []
+	for c in _vfx_copies.get(n, []):
+		if c != null and is_instance_valid(c):
+			out.append(c)
+	return out
+
+
+func _vfx_set_xform(n: Node3D, pos: Vector3, scl: Vector3) -> void:
+	n.position = pos
+	n.scale = scl
+	for c in _vfx_copies_of(n):
+		(c as Node3D).position = pos
+		(c as Node3D).scale = scl
+
+
+# Mismo alineado a la direccion del disparo, en el original y en sus copias.
+func _vfx_place_dir(n: Node3D, pos: Vector3, dir: Vector3) -> void:
+	n.position = pos
+	n.look_at(pos + dir, Vector3.UP)
+	for c in _vfx_copies_of(n):
+		(c as Node3D).look_at(pos + dir, Vector3.UP)
+
+
+func _play_vfx_all(n: Node3D) -> void:
+	_play_vfx(n)
+	for c in _vfx_copies_of(n):
+		_play_vfx(c as Node3D)
+
 func _vfx_start(n: Node3D, life: float, sc: PackedScene) -> void:
 	_vfx_busy.append([n, life, sc])
 
@@ -6927,6 +7084,24 @@ func _vfx_tick(delta: float) -> void:
 			else:
 				_vfx_free[e[2]] = arr2
 			arr2.append(n)
+		if _vfx_copies.has(n):
+			var cps: Array = _vfx_copies[n]
+			for j in cps.size():
+				var c: Node3D = cps[j]
+				if c == null or not is_instance_valid(c):
+					continue
+				c.visible = false
+				var apc: AnimationPlayer = c.get_node_or_null("AnimationPlayer") as AnimationPlayer
+				if apc != null:
+					apc.stop()
+				if j < _vfx_free_m.size():
+					var arrm: Array = []
+					if _vfx_free_m[j].has(e[2]):
+						arrm = _vfx_free_m[j][e[2]]
+					else:
+						_vfx_free_m[j][e[2]] = arrm
+					arrm.append(c)
+			_vfx_copies.erase(n)
 		_vfx_busy.remove_at(i)
 
 func _vfx_release_all() -> void:
@@ -6945,9 +7120,8 @@ func _spawn_binbun_explosion(pos: Vector3, scl: float, tier: int) -> bool:
 	if sc == null:
 		return false
 	var n: Node3D = _vfx_take(sc)
-	n.position = pos
-	n.scale = Vector3.ONE * clampf(scl, 0.7, 2.4)
-	_play_vfx(n)
+	_vfx_set_xform(n, pos, Vector3.ONE * clampf(scl, 0.7, 2.4))
+	_play_vfx_all(n)
 	_vfx_start(n, 4.5, sc)
 	return true
 
@@ -6960,10 +7134,8 @@ func _spawn_binbun_muzzle(world_pos: Vector3, dir: Vector3) -> bool:
 	if d.length() < 0.001:
 		d = Vector3(0.0, 0.0, -1.0)
 	d = d.normalized()
-	# Alinea el destello a la direcciÃ³n del disparo (asume +Z como frente)
-	n.position = world_pos
-	n.look_at(world_pos + d, Vector3.UP)
-	_play_vfx(n)
+	_vfx_place_dir(n, world_pos, d)
+	_play_vfx_all(n)
 	_vfx_start(n, 1.2, _vfx_muzzle)
 	return true
 

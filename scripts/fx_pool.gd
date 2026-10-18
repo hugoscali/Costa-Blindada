@@ -67,6 +67,30 @@ var _free_lights: Array = []
 var _made_nodes: int = 0
 var _made_lights: int = 0
 
+# ─── POOLS ESPEJO (pantalla dividida) ────────────────────────────────────────────
+# En split el arbol principal NO se renderiza: lo que se ve son dos SubViewports con
+# su propia copia del mundo. Como este pool cuelga del arbol principal, en split no se
+# veia NINGUNA explosion. Con espejos cada efecto se crea DIRECTO en cada mitad y aca
+# no se crea nada (si no, el split pagaria tres veces el mismo VFX por cada impacto).
+var _mirrors: Array = []
+
+
+func add_mirror(mp: FxPool) -> void:
+	if mp == null or mp == self:
+		return
+	if not mp._mirrors.is_empty():
+		return  # un espejo no vuelve a espejar: evita recursion
+	if not _mirrors.has(mp):
+		_mirrors.append(mp)
+
+
+func clear_mirrors() -> void:
+	_mirrors.clear()
+
+
+func mirror_count() -> int:
+	return _mirrors.size()
+
 var _sphere: SphereMesh = null
 var _cyl: CylinderMesh = null
 var _mats: Dictionary = {}
@@ -147,6 +171,10 @@ func _acquire_node() -> MeshInstance3D:
 
 # ─── PARTICULAS (chispas de impacto, humo, escombros) ──────────────────────────
 func add_particle(pos: Vector3, vel: Vector3, life: float, grav: float, radius: float, height: float, col: Color, energy: float, unsh: bool, base_alpha: float, fade: float, ecol: Color = Color()) -> void:
+	if not _mirrors.is_empty():
+		for mp in _mirrors:
+			mp.add_particle(pos, vel, life, grav, radius, height, col, energy, unsh, base_alpha, fade, ecol)
+		return
 	_ensure_assets()
 	var p: Part
 	if _parts.size() < MAX_PARTICLES:
@@ -190,6 +218,8 @@ func tick_particles(delta: float) -> void:
 			p.node.material_override = _mat(p.col, p.energy, p.unsh, st, p.ecol)
 		if p.life <= 0.0 or np.y < -1.0:
 			_free_part(i)
+	for mp in _mirrors:
+		mp.tick_particles(delta)
 
 
 func _free_part(i: int) -> void:
@@ -203,6 +233,10 @@ func _free_part(i: int) -> void:
 
 # ─── DESTELLOS Y ANILLOS (antes: Tween + nodo + mesh + material por efecto) ─────
 func add_flash(pos: Vector3, cyl: bool, s0: Vector3, s1: Vector3, col: Color, energy: float, unsh: bool, a0: float, dur_s: float, dur_a: float, ecol: Color = Color()) -> void:
+	if not _mirrors.is_empty():
+		for mp in _mirrors:
+			mp.add_flash(pos, cyl, s0, s1, col, energy, unsh, a0, dur_s, dur_a, ecol)
+		return
 	_ensure_assets()
 	var f: Flash
 	if _flashes.size() < MAX_FLASHES:
@@ -242,6 +276,10 @@ func add_flash(pos: Vector3, cyl: bool, s0: Vector3, s1: Vector3, col: Color, en
 
 # ─── LUCES DE DESTELLO ──────────────────────────────────────────────────────────
 func add_light(pos: Vector3, col: Color, energy: float, radius: float, life: float) -> void:
+	if not _mirrors.is_empty():
+		for mp in _mirrors:
+			mp.add_light(pos, col, energy, radius, life)
+		return
 	var fl: FlashLight
 	if _lights.size() < MAX_LIGHTS:
 		var li: OmniLight3D
@@ -300,6 +338,8 @@ func tick_fx(delta: float) -> void:
 			_lights.remove_at(i)
 			continue
 		l.node.light_energy = l.e0 * (1.0 - _quad_out(clampf(l.t / l.dur, 0.0, 1.0)))
+	for mp in _mirrors:
+		mp.tick_fx(delta)
 
 
 # ─── LIMPIEZA (reinicio de partida / cambio de mapa) ────────────────────────────
@@ -317,6 +357,8 @@ func release_all() -> void:
 		l.node.light_energy = 0.0
 		_free_lights.append(l.node)
 	_lights.clear()
+	for mp in _mirrors:
+		mp.release_all()
 
 
 # Solo para tests: posiciones actuales de las particulas vivas.

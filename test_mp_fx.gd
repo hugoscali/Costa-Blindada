@@ -31,6 +31,9 @@ func _init() -> void:
 	root.add_child(main)
 	await process_frame
 	await process_frame
+	# El test fija mp_role a mano: sin el nodo Net, main._process llama
+	# net._net_client_loop() sobre un Nil y suelta un error por frame.
+	main._setup_net()
 	if main.hud == null:
 		print("FALLO: hud null")
 		quit(1)
@@ -100,16 +103,16 @@ func _init() -> void:
 	main._spawn_net_fx(["snd", 0, 600.0, 5.0, 0.0])
 	check(not main.audio_players[0].playing, "un SFX fuera de alcance no debería sonar")
 	_stop_all(main)
-	var parts0: int = main.particles_list.size()
-	var vfx0: int = main._active_vfx.size()
+	var parts0: int = int(main._fx.stats().get("parts", 0))
+	var vfx0: int = main._vfx_busy.size()
 	main._spawn_net_fx(["boom", 0.0, 5.0, 12.0, 1.5])
 	check(main.audio_players[3].playing, "el cliente no reproduce el boom de una explosión")
-	check(main.particles_list.size() > parts0 or main._active_vfx.size() > vfx0, "el cliente no genera el visual de la explosión")
+	check(int(main._fx.stats().get("parts", 0)) > parts0 or main._vfx_busy.size() > vfx0, "el cliente no genera el visual de la explosión")
 	check(main.shake_amount > 0.0, "el cliente no siente la sacudida de la explosión")
 	_stop_all(main)
 	main._spawn_net_fx(["spark", 0.0, 5.0, 12.0, 4, 1.0, 0.7, 0.0, 3])
 	check(main.audio_players[3].playing, "el cliente no reproduce el sonido del impacto chico")
-	check(main.particles_list.size() > parts0, "el cliente no genera las chispas del impacto")
+	check(int(main._fx.stats().get("parts", 0)) > parts0, "el cliente no genera las chispas del impacto")
 	_stop_all(main)
 
 	# ── 3) CLIENTE: el soldado muerto cae animado ──
