@@ -403,6 +403,10 @@ func on_io_joy() -> void:
 		io_go()
 
 func io_go() -> void:
+	# Empezar partida cierra el menu: si current_menu queda en "input_choice" (o
+	# "split_assign" por la asignacion de mandos), main._input sigue derivando los
+	# botones del mando al menu en vez de a la partida / al teclado virtual.
+	app.current_menu = ""
 	match app.io_next:
 		"single":
 			app._start_game()
@@ -443,6 +447,7 @@ func on_assign_back() -> void:
 func on_split_assign_start() -> void:
 	if app.split_j1_dev < 0 or app.split_j2_dev < 0:
 		return
+	app.current_menu = ""  # la asignacion termino: el mando vuelve a la partida
 	app._start_split_game()
 
 func split_assign_claim(jb: InputEventJoypadButton) -> void:

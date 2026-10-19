@@ -1,7 +1,7 @@
 # Test: ingreso de iniciales en el game over de PANTALLA DIVIDIDA.
-# Reporte del usuario: "al finalizar la partida no nos permite seleccionar las letras".
-# Cubre: mando de J1, mando de J2, teclado de PC (con J1 en joystick y con J1 en teclado),
-# clic con el mouse sobre una letra, y que al guardar no quede ningun VKB "open".
+# Reporte del usuario: "no puedo completar las iniciales con joystick al terminar el 2P local".
+# Escenario A recorre el camino REAL del usuario: menu -> "joystick" -> asignacion de mandos
+# -> partida -> game over. Escenario B: J1 con teclado/mouse y un solo mando (el de J2).
 extends SceneTree
 
 var failures: int = 0
@@ -42,20 +42,31 @@ func _init() -> void:
 	await process_frame
 	await process_frame
 
-	# ── Escenario 1: J1 con joystick (el del reporte: dos mitades con teclado virtual) ──
-	main.local_input_mode = 1
-	main.split_j1_dev = 0
-	main.split_j2_dev = 1
-	main._start_split_game()
+	# ── ESCENARIO A: el camino real, J1 con joystick y dos mandos ──
+	main._menu.show_input_choice("split")
 	await process_frame
-	main.score = 1000
+	main._menu.on_io_joy()  # J1 elige joystick -> pantalla de asignacion de mandos
+	await process_frame
+	check(main.current_menu == "split_assign", "pantalla de asignacion de mandos activa")
+	main._input(joy(0, 0))  # J1 reclama su pad
+	main._input(joy(1, 0))  # J2 reclama el suyo
+	await process_frame
+	check(main.split_j1_dev == 0 and main.split_j2_dev == 1, "los dos mandos quedan asignados (J1=0, J2=1)")
+	main._menu.on_split_assign_start()
+	await process_frame
+	await process_frame
+	check(main.split_mode == true and main.mp_role == 3, "partida 2P local iniciada desde la asignacion con mandos")
+	check(main.current_menu == "", "al empezar la partida no queda un menu abierto que se coma el input del mando")
+	check(main.phase == main.GamePhase.PLAYING, "fase PLAYING")
+
+	main.score = 142250
 	main._split_gameover()
 	await process_frame
 	check(main.phase == main.GamePhase.GAMEOVER, "game over split activo")
 	check(main._svkb[0].open and main._svkb[1].open, "los 2 teclados virtuales estan abiertos")
 	check(main.mp_go_phase == 0, "fase 0 (esperando iniciales)")
 
-	# J1 con su mando (device 0)
+	# J1 con su mando: D-pad mueve, A agrega (antes no llegaban: se perdian en "split_assign")
 	var c0: int = main._svkb[0].cursor
 	main._input(joy(0, JOY_BUTTON_DPAD_DOWN))
 	await process_frame
@@ -63,8 +74,12 @@ func _init() -> void:
 	main._input(joy(0, int(main._jb("confirm"))))
 	await process_frame
 	check(main.initials.length() == 1, "J1: A agrega una letra (initials='%s')" % main.initials)
+	main._input(joy(0, JOY_BUTTON_DPAD_RIGHT))
+	main._input(joy(0, int(main._jb("confirm"))))
+	await process_frame
+	check(main.initials.length() == 2, "J1 completa una segunda letra (initials='%s')" % main.initials)
 
-	# J2 con su mando (device 1)
+	# J2 con su mando
 	var c1: int = main._svkb[1].cursor
 	main._input(joy(1, JOY_BUTTON_DPAD_RIGHT))
 	await process_frame
@@ -72,10 +87,19 @@ func _init() -> void:
 	main._input(joy(1, int(main._jb("confirm"))))
 	await process_frame
 	check(main.p2_initials.length() == 1, "J2: A agrega una letra (p2_initials='%s')" % main.p2_initials)
+	main._input(joy(1, JOY_BUTTON_DPAD_DOWN))
+	main._input(joy(1, int(main._jb("confirm"))))
+	await process_frame
+	check(main.p2_initials.length() == 2, "J2 completa una segunda letra (p2_initials='%s')" % main.p2_initials)
 
-	# Teclado de PC con J1 en joystick: antes estaba bloqueado (el bug reportado)
+	# B borra la ultima letra en la mitad de J1
+	main._input(joy(0, int(main._jb("back"))))
+	await process_frame
+	check(main.initials.length() == 1, "B borra una letra en la mitad de J1 (initials='%s')" % main.initials)
+
+	# Teclado de PC con J1 en joystick (antes estaba bloqueado)
 	var ini_before: String = main.initials
-	main._input(key(KEY_Q, 113))  # 'q' minuscula -> debe entrar como Q
+	main._input(key(KEY_Q, 113))
 	await process_frame
 	check(main.initials.length() > ini_before.length(), "J1 puede tipear con el teclado de PC aunque haya elegido joystick ('%s' -> '%s')" % [ini_before, main.initials])
 
@@ -101,7 +125,7 @@ func _init() -> void:
 	await process_frame
 	check(not main._svkb[0].open and not main._svkb[1].open, "tras guardar, ningun teclado virtual queda abierto")
 
-	# ── Escenario 2: J1 con teclado/mouse (el otro camino, no debe haberse roto) ──
+	# ── ESCENARIO B: J1 con teclado/mouse y un solo mando (el de J2) ──
 	main._teardown_split()
 	await process_frame
 	main.local_input_mode = 0

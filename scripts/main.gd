@@ -922,6 +922,11 @@ func _set_gun_visible(gun: Node3D, i: int) -> void:
 		w2.visible = (i == 2)
 
 func _start_split_game() -> void:
+	# Ningun menu queda "abierto". Si current_menu siguiera valiendo "split_assign",
+	# main._input manda todos los botones del mando a la pantalla de asignacion: la partida
+	# se juega igual (el input de juego se consulta por polling), pero en el game over el
+	# D-pad y A nunca llegan al teclado virtual de las iniciales.
+	current_menu = ""
 	var was_split: bool = split_mode  # true si es REINICIO (ya existÃ­an viewports)
 	if ui_start:
 		ui_start.play()
@@ -1419,6 +1424,7 @@ func _teardown_split() -> void:
 	_hud.update_hud()
 
 func _start_game_mp() -> void:
+	current_menu = ""  # ninguna pantalla de menu sigue abierta durante la partida
 	if ui_start:
 		ui_start.play()
 	if music_enabled and music_player:
@@ -4762,7 +4768,10 @@ func _input(event: InputEvent) -> void:
 		return
 	# â”€â”€ GAMEPAD: split (J2) o joystick local (menÃºs siempre; partida si eligiÃ³ joystick) â”€â”€
 	if event is InputEventJoypadButton:
-		if current_menu == "split_assign":
+		# "split_assign" solo vale mientras el menu esta abierto: si el valor quedara despues
+		# de empezar la partida, los botones del mando se pierden ahi y nunca llegan al
+		# teclado virtual del game over (iniciales imposibles con joystick).
+		if current_menu == "split_assign" and phase == GamePhase.MENU:
 			_menu.split_assign_claim(event as InputEventJoypadButton)
 		elif split_mode:
 			_split_input_joypad(event as InputEventJoypadButton)
@@ -4880,6 +4889,7 @@ func _handle_input() -> void:
 
 # â”€â”€â”€ GAME FLOW â”€â”€â”€
 func _start_game() -> void:
+	current_menu = ""  # ninguna pantalla de menu sigue abierta durante la partida
 	if ui_start:
 		ui_start.play()
 	if music_enabled and music_player:
