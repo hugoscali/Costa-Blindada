@@ -58,17 +58,23 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.engine_ref }}" "${{ inputs.engine_repo }}" engine
           git -C engine log --oneline -1
 
+      - name: Caché de sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-template-${{ inputs.engine_ref }}-${{ runner.os }}
+
       - name: Compilar template_release (Vulkan, sin D3D12)
         working-directory: engine
         run: |
           scons target=template_release production=yes platform=linux arch=x86_64 \
-            use_vulkan=yes use_d3d12=no verbose=no -j"$(nproc)"
+            use_vulkan=yes use_d3d12=no sccache=yes verbose=no -j"$(nproc)"
           ls -l bin/
 
       - name: Verificar version y glibc maxima
         working-directory: engine
         run: |
-          BIN="$(ls bin/godot.linux.template_release* | head -1)"
+          BIN="$(ls bin/godot.linuxbsd.template_release* | head -1)"
           echo "binario: $BIN"
           "./$BIN" --version || true
           ./"$BIN" --version > /tmp/engine_version.txt || true
@@ -93,5 +99,5 @@ jobs:
         with:
           name: godot-linux-template_release-${{ inputs.engine_ref }}
           path: |
-            engine/bin/godot.linux.template_release*
+            engine/bin/godot.linuxbsd.template_release*
           if-no-files-found: error
