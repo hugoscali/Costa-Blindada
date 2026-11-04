@@ -1,0 +1,97 @@
+name: Compilar export template Linux (rtx-godot)
+
+# Compila el template Linux del fork rtx-godot (el fork no publica export templates) y lo
+# sube como artifact para instalarlo en %APPDATA%\Godot\export_templates\4.8.dev5\.
+#
+# POR QUE UN RUNNER VIEJO: el binario Linux que exporta Godot hereda la glibc de la maquina
+# donde se compilo el template. Si la glibc del build es mas nueva que la del jugador, el
+# juego no arranca ("GLIBC_2.43 not found"). ubuntu-22.04 trae glibc 2.35, y asi el build
+# cubre SteamOS/Steam Deck (2.41), Fedora, Arch y Ubuntu LTS.
+#
+# Correr esto SOLO cuando cambia la version del engine. El export del juego se hace local.
+#
+# En Linux el propio SConstruct del fork apaga Streamline (usa_streamline -> False si
+# platform != windows), asi que este template no trae DLSS: el juego detecta que el engine
+# no tiene la clase Streamline y cae a FSR 2.2 (main.gd, _engine_has_dlss / _apply_fsr).
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_repo:
+        description: "fork de Godot a compilar"
+        required: false
+        default: "https://github.com/bailaiOWO/rtx-godot.git"
+      engine_ref:
+        description: "tag o commit del fork (debe coincidir con el engine local)"
+        required: false
+        default: "rtx-4.8-dev5-3"
+      max_glibc:
+        description: "glibc maxima que puede exigir el binario (2.35 = ubuntu-22.04)"
+        required: false
+        default: "2.35"
+
+permissions:
+  contents: read
+
+jobs:
+  template:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkgconf git python3 python3-pip python3-dev \
+            autoconf autoconf-dev libtool meson \
+            libgl1-mesa-dev libglu1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev \
+            libxrandr-dev libxxf86vm-dev libasound2-dev pulseaudio libdbus-1-dev \
+            libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev \
+            libdecor-0-dev libmbim-glib-dev libproxy-dev
+          # Godot 4.8 pide SCons 4.4+; el paquete de 22.04 es mas viejo.
+          python3 -m pip install --quiet --upgrade "scons>=4.4"
+          scons --version | head -3
+          ldd --version | head -1
+
+      - name: Clonar el engine
+        run: |
+          git clone --depth 1 --branch "${{ inputs.engine_ref }}" "${{ inputs.engine_repo }}" engine
+          git -C engine log --oneline -1
+
+      - name: Compilar template_release (Vulkan, sin D3D12)
+        working-directory: engine
+        run: |
+          scons target=template_release production=yes platform=linux arch=x86_64 \
+            use_vulkan=yes use_d3d12=no verbose=no -j"$(nproc)"
+          ls -l bin/
+
+      - name: Verificar version y glibc maxima
+        working-directory: engine
+        run: |
+          BIN="$(ls bin/godot.linux.template_release* | head -1)"
+          echo "binario: $BIN"
+          "./$BIN" --version || true
+          ./"$BIN" --version > /tmp/engine_version.txt || true
+          maxv="$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | tail -1)"
+          echo "glibc maxima requerida por el binario: $maxv"
+          objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -V | uniq | tail -8
+          req="${maxv#GLIBC_}"
+          python3 - "$req" "${{ inputs.max_glibc }}" <<'PY'
+          import sys
+          def v(s):
+              return tuple(int(x) for x in s.split("."))
+          got, want = v(sys.argv[1]), v(sys.argv[2])
+          if got > want:
+              print("::error::el build exige glibc %s; el limite es %s" % (sys.argv[1], sys.argv[2]))
+              sys.exit(1)
+          print("OK: el binario pide glibc >= %s (limite %s)" % (sys.argv[1], sys.argv[2]))
+          PY
+          sha256sum "$BIN" | tee /tmp/engine_sha256.txt
+
+      - name: Subir el template
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-linux-template_release-${{ inputs.engine_ref }}
+          path: |
+            engine/bin/godot.linux.template_release*
+          if-no-files-found: error
