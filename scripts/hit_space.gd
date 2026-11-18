@@ -125,6 +125,7 @@ func best_hit(p: Vector3, reach: float, parea: float) -> int:
 	var lo: PackedInt32Array = ord
 	var lh: PackedInt32Array = _head
 	var ln: PackedInt32Array = _next
+	var lc: PackedFloat32Array = _cellmax   # idem: solo lectura, el filtro de celda se paga por celda
 	var bx: float = p.x
 	var by: float = p.y
 	var bz: float = p.z
@@ -153,7 +154,7 @@ func best_hit(p: Vector3, reach: float, parea: float) -> int:
 			# Filtro de celda: si la caja de la celda esta mas lejos que el radio mas
 			# grande que hay adentro, ningun enemigo de esa celda puede tocar el disparo.
 			# (La altura no se mira aca: es conservador, la prueba fina viene abajo.)
-			var lim: float = _cellmax[cidx] + parea
+			var lim: float = lc[cidx] + parea
 			var xmin: float = float(x) * CELL - HALF
 			var cx_clamp: float = bx
 			if cx_clamp < xmin:
@@ -197,6 +198,10 @@ func candidates(p: Vector3, reach: float) -> int:
 	var z0: int = maxi(0, cz0 - span)
 	var z1: int = mini(GRID - 1, cz0 + span)
 	var z: int = z0
+	# _head/_next son solo lectura aca (buf si se escribe y por eso queda como miembro:
+	# los PackedArray se copian al escribirles por una variable local).
+	var lh: PackedInt32Array = _head
+	var ln: PackedInt32Array = _next
 	while z <= z1:
 		var row: int = z * GRID
 		var zmin: float = float(z) * CELL - HALF
@@ -220,12 +225,12 @@ func candidates(p: Vector3, reach: float) -> int:
 			# Misma idea: la caja de la celda esta mas lejos que reach -> adentro no
 			# puede haber ningun candidato aceptable.
 			if ddx * ddx + ddz * ddz <= reach * reach:
-				s = _head[row + x]
+				s = lh[row + x]
 			while s >= 0:
 				if buf_n < CAP:
 					buf[buf_n] = s
 					buf_n += 1
-				s = _next[s]
+				s = ln[s]
 			x += 1
 		z += 1
 	return buf_n

@@ -32,6 +32,16 @@ const SEP_R_TANK: float = 5.5
 const TANK_HULL: float = 2.5
 const BULLET_R: float = 22.0
 
+# ─── REJILLA DE BALAS ───
+# La esquiva de balas miraba TODAS las balas del jugador por cada soldado: con 400
+# balas en pantalla y 40 soldados son 16.000 Vectores por frame (medido: 5,2 ms de
+# un solo nucleo, o sea un tercio del frame entero). Con una rejilla propia de
+# 22 m (= BULLET_R), cada soldado mira las balas de su celda y las 8 vecinas, que
+# son justo las que pueden estar a 22 m o menos: la cuenta por bala no cambia.
+const BCELL: float = 22.0
+const BGRID_MIN: float = -352.0    # cubre todo el campo de tiro (las balas se cullean en |x|,|z| <= 340)
+const BG_W: int = 32               # 32 * 22 = 704 m
+
 # ─── PARALELISMO ───
 const MIN_PARALLEL: int = 64       # por debajo de N soldados, el threading cuesta más de lo que ahorra
 const MAX_TASKS: int = 4           # techo de tareas simultáneas (más allá el reparto no ayuda)
@@ -48,6 +58,10 @@ var _n: int = 0
 var _head: PackedInt32Array = PackedInt32Array()
 var _next: PackedInt32Array = PackedInt32Array()
 var _occ: PackedFloat32Array = PackedFloat32Array()     # (x, z, kind) kind 0=soldado 1=tanque
+
+# Rejilla de balas del jugador: _bhead por celda, _bnext por bala
+var _bhead: PackedInt32Array = PackedInt32Array()
+var _bnext: PackedInt32Array = PackedInt32Array()
 
 # Salidas (x, y) indexadas por el índice del soldado
 var _sep: PackedFloat32Array = PackedFloat32Array()     # empuje de separación (pelotón)
@@ -82,6 +96,7 @@ func solve(sold: PackedFloat32Array, tanks: PackedFloat32Array, rocks: PackedFlo
 	_fixt.resize(_n * 2)
 	_fixt.fill(0.0)
 	_build_grid()
+	_build_bgrid()
 	var tasks: int = _task_count()
 	if tasks <= 1:
 		var job0 := Chunk.new()
@@ -189,6 +204,31 @@ func _build_grid() -> void:
 		idx += 1
 		t += 2
 
+func _bgx(x: float) -> int:
+	return clampi(int((x - BGRID_MIN) / BCELL), 0, BG_W - 1)
+
+
+func _bgz(z: float) -> int:
+	return clampi(int((z - BGRID_MIN) / BCELL), 0, BG_W - 1)
+
+
+## Rejilla de las balas del jugador. Se arma una vez por frame, en el hilo
+## principal (es O(balas)); el trabajo grande -mirar vecinos por soldado- queda
+## para las tareas paralelas.
+func _build_bgrid() -> void:
+	var nb: int = int(_bullets.size()) >> 2
+	_bhead.resize(BG_W * BG_W)
+	_bhead.fill(-1)
+	_bnext.resize(nb)
+	var idx: int = 0
+	var k: int = 0
+	while k < _bullets.size():
+		var c: int = _bgz(_bullets[k + 1]) * BG_W + _bgx(_bullets[k])
+		_bnext[idx] = _bhead[c]
+		_bhead[c] = idx
+		idx += 1
+		k += 4
+
 func _merge(job: Chunk) -> void:
 	var n: int = job.i1 - job.i0
 	for i in n:
@@ -230,6 +270,8 @@ class Chunk:
 		var head: PackedInt32Array = ai._head
 		var nxt: PackedInt32Array = ai._next
 		var occ: PackedFloat32Array = ai._occ
+		var bhead: PackedInt32Array = ai._bhead
+		var bnext: PackedInt32Array = ai._bnext
 		var delta: float = ai._delta
 		for i in range(i0, i1):
 			var li: int = i * 2
@@ -280,17 +322,32 @@ class Chunk:
 					fixr_v += rdir * (rrad - rd)
 				r += 3
 
-			# Evasión de las balas del jugador
-			var b: int = 0
-			while b < bullets.size():
-				var away2 := Vector2(x - bullets[b], z - bullets[b + 1])
-				var bd: float = away2.length()
-				if bd < EnemyAI.BULLET_R:
-					var adir: Vector2 = away2 / maxf(0.01, bd)
-					var bdir := Vector2(bullets[b + 2], bullets[b + 3])
-					var wgt: float = (1.0 - bd / EnemyAI.BULLET_R) * maxf(0.25, bdir.dot(adir))
-					evade_v += adir * wgt
-				b += 4
+			# Evasión de las balas del jugador: solo las balas de la celda propia y las
+			# 8 vecinas de la rejilla de 22 m. Como el radio de esquiva es 22 m, ninguna
+			# bala fuera de esas 9 celdas puede entrar en la cuenta: el resultado es el
+			# mismo de antes, con ~2 ordenes de magnitud menos Vectores.
+			var bgx: int = ai._bgx(x)
+			var bgz: int = ai._bgz(z)
+			var qz: int = bgz - 1
+			while qz <= bgz + 1:
+				if qz >= 0 and qz < EnemyAI.BG_W:
+					var brow: int = qz * EnemyAI.BG_W
+					var qx: int = bgx - 1
+					while qx <= bgx + 1:
+						if qx >= 0 and qx < EnemyAI.BG_W:
+							var bi: int = bhead[brow + qx]
+							while bi >= 0:
+								var bo: int = bi * 4
+								var away2 := Vector2(x - bullets[bo], z - bullets[bo + 1])
+								var bd: float = away2.length()
+								if bd < EnemyAI.BULLET_R:
+									var adir: Vector2 = away2 / maxf(0.01, bd)
+									var bdir := Vector2(bullets[bo + 2], bullets[bo + 3])
+									var wgt: float = (1.0 - bd / EnemyAI.BULLET_R) * maxf(0.25, bdir.dot(adir))
+									evade_v += adir * wgt
+								bi = bnext[bi]
+						qx += 1
+				qz += 1
 
 			if sep_v.length() > 3.0:
 				sep_v = sep_v.normalized() * 3.0

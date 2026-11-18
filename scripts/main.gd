@@ -267,6 +267,7 @@ var p2_shoot_pressed := false
 var p2_initials := ""
 var p2_ini_cursor := 0
 var _mirrors: Array = []             # [{orig, copies:[Node3D], ap_orig, ap_copies:[]}]
+var _mirror_of: Dictionary = {}      # instance_id del original -> su espejo (lookup O(1))
 var base_hp_max := 150.0             # vida mÃ¡xima de la base (HUD %)
 var slot_states: Array = []          # por slot: {weapon, ammo, last_shot, aim, shoot, score, kills}
 var slot_by_pid: Dictionary = {}     # host: peer_id -> slot
@@ -586,10 +587,9 @@ const SPLIT_SPIN_NODES: Array[String] = ["MainRotor", "TailRotor"]
 # IntercepciÃ³n (polling por frame): un nodo 3D dinÃ¡mico nuevo en la raÃ­z â†’
 # copia visible espejada en los 2 viewports
 func _split_has_mirror(orig: Node) -> bool:
-	for mi in _mirrors:
-		if mi["orig"] == orig:
-			return true
-	return false
+	# O(1): antes era un barrido de _mirrors POR CADA hijo de main, cada frame. Con
+	# 11.000 hijos y miles de espejos eso ya era el cuello de CPU del modo split.
+	return _mirror_of.has(orig.get_instance_id())
 
 func _split_scan_new_nodes() -> void:
 	for ch in get_children():
@@ -605,14 +605,24 @@ func _register_split_mirror(orig: Node3D) -> void:
 	var c2: Node3D = _split_clone_into(orig, vp_b)
 	if c1 == null and c2 == null:
 		return
-	_mirrors.append({
+	var mi: Dictionary = {
 		"orig": orig, "c1": c1, "c2": c2,
+		"oid": orig.get_instance_id(),
 		"ap_o": orig.get_node_or_null("AnimationPlayer") as AnimationPlayer,
 		"ap1": c1.get_node_or_null("AnimationPlayer") as AnimationPlayer if c1 != null else null,
 		"ap2": c2.get_node_or_null("AnimationPlayer") as AnimationPlayer if c2 != null else null,
 		"has_rifle": orig.get_node_or_null("Rifle") != null,
+		# Rifle y skeleton resueltos una sola vez: buscarlos por nombre dentro del loop
+		# de espejos eran 2 busquedas por soldado, por mitad, cada frame.
+		"rf_o": orig.get_node_or_null("Rifle") as Node3D,
+		"rf1": c1.get_node_or_null("Rifle") as Node3D if c1 != null else null,
+		"rf2": c2.get_node_or_null("Rifle") as Node3D if c2 != null else null,
+		"sk1": c1.get_node_or_null("Rig/Skeleton3D") as Skeleton3D if c1 != null else null,
+		"sk2": c2.get_node_or_null("Rig/Skeleton3D") as Skeleton3D if c2 != null else null,
 		"spins": _split_collect_spins(orig, c1, c2)
-	})
+	}
+	_mirrors.append(mi)
+	_mirror_of[mi["oid"]] = mi   # lookup O(1) en _split_scan_new_nodes
 
 
 # Pares (original, copia) de los sub-nodos animados por codigo (helices). Se resuelven
@@ -657,15 +667,23 @@ func _sync_split_copy(mi: Dictionary, orig: Node3D, ckey: String, akey: String) 
 	c.rotation = orig.rotation
 	c.scale = orig.scale
 	c.visible = orig.visible
-	# Rifle del soldado (pose de disparo/apuntamiento)
+	# Rifle del soldado (pose de disparo/apuntamiento): los nodos ya estan resueltos
+	# en el espejo, aca solo se copian pose y rotacion.
 	if bool(mi.get("has_rifle", false)):
-		var g_o: Node = orig.get_node_or_null("Rifle")
-		var g_c: Node = c.get_node_or_null("Rifle")
-		if g_o != null and g_c != null:
-			(g_c as Node3D).position = (g_o as Node3D).position
-			(g_c as Node3D).rotation = (g_o as Node3D).rotation
-	# Gear militar (casco/chaleco) â€” no-op si el modelo no lo lleva
-	_sync_gear(c)
+		var g_o: Variant = mi.get("rf_o")
+		var g_c: Variant = mi["rf1"] if ckey == "c1" else mi["rf2"]
+		if g_o != null and g_c != null and is_instance_valid(g_o) and is_instance_valid(g_c):
+			var go3: Node3D = g_o as Node3D
+			var gc3: Node3D = g_c as Node3D
+			gc3.position = go3.position
+			gc3.rotation = go3.rotation
+	# Gear militar (casco/chaleco) â€” no-op si el modelo no lo lleva. El skeleton de la
+	# copia viene del espejo: buscarlo por nombre cada frame era un palo por soldado.
+	var sk_v: Variant = mi["sk1"] if ckey == "c1" else mi["sk2"]
+	if sk_v != null and is_instance_valid(sk_v):
+		_sync_gear(c, sk_v as Skeleton3D)
+	else:
+		_sync_gear(c)
 	# AnimaciÃ³n (soldados: walk/run/idle/shoot/fall)
 	var ap_o: AnimationPlayer = mi["ap_o"]
 	if ap_o != null and ap_o.current_animation != "":
@@ -682,12 +700,22 @@ func _sync_split_copy(mi: Dictionary, orig: Node3D, ckey: String, akey: String) 
 func _update_split_mirrors() -> void:
 	if _mirrors.is_empty():
 		return
-	var to_prune: Array = []
+	# Una sola pasada: lo muerto se descarta reconstruyendo la lista. Antes se hacia
+	# _mirrors.erase(mi) dentro del loop, y Array.erase recorre todo el array: con
+	# cientos de balas/efectos muriendo por frame eso era O(n^2) cada frame.
+	var keep: Array = []
 	for mi in _mirrors:
 		var orig_v: Variant = mi["orig"]
 		if orig_v == null or not is_instance_valid(orig_v) or (orig_v as Node).get_parent() == null:
-			to_prune.append(mi)
+			_mirror_of.erase(mi["oid"])
+			var c1v: Variant = mi["c1"]
+			if c1v != null and is_instance_valid(c1v):
+				(c1v as Node).queue_free()
+			var c2v: Variant = mi["c2"]
+			if c2v != null and is_instance_valid(c2v):
+				(c2v as Node).queue_free()
 			continue
+		keep.append(mi)
 		var orig := orig_v as Node3D
 		_sync_split_copy(mi, orig, "c1", "ap1")
 		_sync_split_copy(mi, orig, "c2", "ap2")
@@ -706,14 +734,7 @@ func _update_split_mirrors() -> void:
 				cn.position = so.position
 				cn.rotation = so.rotation
 				cn.scale = so.scale
-	for mi in to_prune:
-		var c1v: Variant = mi["c1"]
-		if c1v != null and is_instance_valid(c1v):
-			(c1v as Node).queue_free()
-		var c2v: Variant = mi["c2"]
-		if c2v != null and is_instance_valid(c2v):
-			(c2v as Node).queue_free()
-		_mirrors.erase(mi)
+	_mirrors = keep
 
 func _split_viewport_size() -> Vector2i:
 	var vp := get_viewport().get_visible_rect().size
@@ -1382,6 +1403,7 @@ func _free_split_hints() -> void:
 func _teardown_split() -> void:
 	split_mode = false
 	_mirrors.clear()
+	_mirror_of.clear()
 	p2_btn_prev.clear()
 	# VFX del split: liberar los pools de cada mitad y cortar los espejos. Si quedaran
 	# espejos apuntando a pools muertos, el siguiente disparo escribiria en el vacio.
@@ -5627,55 +5649,81 @@ func _disembark_tank(e: Dictionary) -> void:
 		"speed": 1.0 + wave * 0.05, "shoot_timer": randf_range(3, 5)
 	})
 # â”€â”€â”€ ENEMY MESHES â”€â”€â”€
+# El .glb del soldado se carga una sola vez y se reusa en cada spawn. La malla y el
+# material del fogonazo tambien se comparten (antes cada soldado creaba los suyos),
+# y la normalizacion del rig (escala + centrado) se calcula una sola vez: el modelo
+# es siempre el mismo. Todo esto es invisible para el juego; lo que se gana es el
+# pico de CPU de cada descarga de lancha (4,8 ms por soldado medidos en headless).
+var _soldier_scene: PackedScene = null
+var _sf_mesh: SphereMesh = null
+var _sf_mat: StandardMaterial3D = null
+var _sol_norm: PackedFloat32Array = PackedFloat32Array()   # [escala, centro.x, centro.y, centro.z]
+const SOLDIER_HIDE_WEAPONS: Array = ["Revolver", "Sniper", "Revolver_Small", "Pistol", "SMG",
+	"GrenadeLauncher", "ShortCannon", "Shotgun", "Sniper_2", "RocketLauncher",
+	"Shovel", "Knife_1", "Knife_2"]
+
+
 func _create_soldier_mesh() -> Node3D:
 	# Soldado realista con AK (char_soldier.glb, CC0, con animaciones)
-	var model_scene: PackedScene = load("res://assets/soldiers2/char_soldier.glb")
+	if _soldier_scene == null:
+		_soldier_scene = load("res://assets/soldiers2/char_soldier.glb")
+	var model_scene: PackedScene = _soldier_scene
 	if model_scene == null:
 		return _create_soldier_fallback()
 	var model: Node3D = model_scene.instantiate()
 
 	# â”€â”€ Esconder el rack de armas ANTES de medir (inflarÃ­an el tamaÃ±o): solo queda el AK â”€â”€
-	var hide_weapons := ["Revolver", "Sniper", "Revolver_Small", "Pistol", "SMG",
-		"GrenadeLauncher", "ShortCannon", "Shotgun", "Sniper_2", "RocketLauncher",
-		"Shovel", "Knife_1", "Knife_2"]
-	for mi_node in model.find_children("", "MeshInstance3D"):
+	# Una sola pasada por los MeshInstance3D del rig: la lista queda guardada y se
+	# reutiliza para medir el AABB (antes se recorria el arbol dos veces por soldado).
+	var mis: Array = model.find_children("", "MeshInstance3D")
+	for mi_node in mis:
 		var mi := mi_node as MeshInstance3D
-		if mi != null and hide_weapons.has(mi.name):
+		if mi != null and SOLDIER_HIDE_WEAPONS.has(mi.name):
 			# Se LIBERAN, no solo se esconden: 13 MeshInstance3D por soldado quedaban
 			# atados al Skeleton3D como superficies skinned que nunca se dibujaban.
 			mi.visible = false
 			mi.free()
 
 	# â”€â”€ Normalizar: alto 1.75 m, pies en y=0, centrado en el origen â”€â”€
-	var combined := AABB()
-	var has_any := false
-	for mi_node in model.find_children("", "MeshInstance3D"):
-		var mi := mi_node as MeshInstance3D
-		if mi == null or mi.mesh == null or not mi.visible:
-			continue
-		# AABB en el espacio del root: encadenar transforms hasta el root
-		var t := Transform3D.IDENTITY
-		var p: Node3D = mi
-		while p != null and p != model:
-			t = p.transform * t
-			p = p.get_parent() as Node3D
-		var aab: AABB = t * mi.mesh.get_aabb()
-		if has_any:
-			combined = combined.merge(aab)
-		else:
-			combined = aab
-		has_any = true
-	if not has_any:
-		model.free()
-		return _create_soldier_fallback()
-	var sc: float = 1.75 / maxf(combined.size.y, 0.0001)
-	var content := model.get_node_or_null("RootNode") as Node3D
-	if content != null:
-		content.position = Vector3(
+	var sc: float = 1.0
+	if _sol_norm.size() == 4:
+		# El rig es siempre el mismo: la escala y el centrado ya estan medidos.
+		sc = _sol_norm[0]
+		var content0 := model.get_node_or_null("RootNode") as Node3D
+		if content0 != null:
+			content0.position = Vector3(_sol_norm[1], _sol_norm[2], _sol_norm[3])
+	else:
+		var combined := AABB()
+		var has_any := false
+		for mi_node in mis:
+			if not is_instance_valid(mi_node):
+				continue   # las armas del rack ya fueron liberadas arriba
+			var mi2 := mi_node as MeshInstance3D
+			if mi2 == null or mi2.mesh == null or not mi2.visible:
+				continue
+			# AABB en el espacio del root: encadenar transforms hasta el root
+			var t := Transform3D.IDENTITY
+			var p: Node3D = mi2
+			while p != null and p != model:
+				t = p.transform * t
+				p = p.get_parent() as Node3D
+			var aab: AABB = t * mi2.mesh.get_aabb()
+			if has_any:
+				combined = combined.merge(aab)
+			else:
+				combined = aab
+			has_any = true
+		if not has_any:
+			model.free()
+			return _create_soldier_fallback()
+		sc = 1.75 / maxf(combined.size.y, 0.0001)
+		_sol_norm = PackedFloat32Array([sc,
 			-((combined.position.x + combined.end.x) * 0.5),
 			-combined.position.y,
-			-((combined.position.z + combined.end.z) * 0.5)
-		)
+			-((combined.position.z + combined.end.z) * 0.5)])
+		var content := model.get_node_or_null("RootNode") as Node3D
+		if content != null:
+			content.position = Vector3(_sol_norm[1], _sol_norm[2], _sol_norm[3])
 	model.scale = Vector3(sc, sc, sc)
 
 	# Game-logic animation aliases (walk/idle/run/shoot/fall)
@@ -5699,15 +5747,19 @@ func _create_soldier_mesh() -> Node3D:
 	model.add_child(gun)
 	model.set_meta("gun_inv_scale", inv_sc)
 	var mflash := MeshInstance3D.new()
-	var mfm := SphereMesh.new()
-	mfm.radius = 0.06
-	var mfm_mat := StandardMaterial3D.new()
-	mfm_mat.albedo_color = Color(1, 0.9, 0.4)
-	mfm_mat.emission_enabled = true
-	mfm_mat.emission = Color(1, 0.8, 0.25)
-	mfm_mat.emission_energy_multiplier = 8.0
-	mflash.mesh = mfm
-	mflash.material_override = mfm_mat
+	# Malla y material del fogonazo compartidos entre soldados: cada soldado nuevo
+	# creaba dos recursos nuevos (y en maquina con GPU eso ademas especializa el
+	# sombreador). Nadie cambia el material del destello: solo su visible.
+	if _sf_mesh == null:
+		_sf_mesh = SphereMesh.new()
+		_sf_mesh.radius = 0.06
+		_sf_mat = StandardMaterial3D.new()
+		_sf_mat.albedo_color = Color(1, 0.9, 0.4)
+		_sf_mat.emission_enabled = true
+		_sf_mat.emission = Color(1, 0.8, 0.25)
+		_sf_mat.emission_energy_multiplier = 8.0
+	mflash.mesh = _sf_mesh
+	mflash.material_override = _sf_mat
 	mflash.position = Vector3(0.5, 0.0, 0.0)
 	mflash.visible = false
 	mflash.name = "MuzzleFlash"
@@ -5789,13 +5841,14 @@ func _add_military_gear(model: Node3D) -> void:
 			if bi >= 0:
 				model.get_meta("gear_items").append([n, bi, n.position])
 
-func _sync_gear(model: Node3D) -> void:
+func _sync_gear(model: Node3D, skel: Skeleton3D = null) -> void:
 	if not model.has_meta("gear_items"):
 		return
 	var items: Array = model.get_meta("gear_items")
 	if items.is_empty():
 		return
-	var skel: Skeleton3D = model.get_node_or_null("Rig/Skeleton3D") as Skeleton3D
+	if skel == null:
+		skel = model.get_node_or_null("Rig/Skeleton3D") as Skeleton3D
 	if skel == null:
 		return
 	for it in items:
@@ -5811,12 +5864,19 @@ func _enemy_muzzle_flash(soldier: Node3D) -> void:
 	if flash == null:
 		return
 	flash.visible = true
-	var tw := create_tween()
+	# Tween atado al propio destello: si el soldado muere antes de los 0,05 s el tween
+	# se mata solo. create_tween() de main dejaba un callback apuntando a un nodo ya
+	# libre -> "Lambda capture at index 0 was freed" + visible=false sobre Nil, un
+	# error por cada soldado muerto disparando.
+	var tw := flash.create_tween()
 	tw.tween_interval(0.05)
 	tw.tween_callback(func(): flash.visible = false)
 
-func _set_soldier_gun_pose(soldier: Node3D, aiming: bool) -> void:
-	var gun := soldier.get_node_or_null("Rifle") as Node3D
+func _set_soldier_gun_pose(soldier: Node3D, aiming: bool, gun: Node3D = null) -> void:
+	# `gun` puede venir cacheado por quien llama (el loop de enemigos lo guarda en la
+	# entrada del enemigo); si no se pasa, se busca como siempre.
+	if gun == null:
+		gun = soldier.get_node_or_null("Rifle") as Node3D
 	if gun == null:
 		return
 	var gs: float = float(soldier.get_meta("gun_inv_scale")) if soldier.has_meta("gun_inv_scale") else 1.0
@@ -6197,18 +6257,34 @@ func _shoot() -> void:
 		"slot": 0 if (mp_role == 1 or mp_role == 3) else -1
 	})
 
+var _proj_mesh_cache: Dictionary = {}   # radio -> SphereMesh compartido
+var _proj_mat_cache: Dictionary = {}    # color -> StandardMaterial3D compartido
+
+
 func _create_projectile(radius: float, color: Color) -> MeshInstance3D:
+	# Malla y material se comparten entre balas del mismo tipo (misma idea que el
+	# cache de materiales de FxPool). Cada bala nueva creaba su SphereMesh y su
+	# StandardMaterial3D: medido 200 us por bala, con 400 balas en pantalla eso es
+	# parte del loop de disparos. Nadie toca el material de una bala en vuelo.
+	var mk: String = str(radius)
+	var sm: SphereMesh = _proj_mesh_cache.get(mk) as SphereMesh
+	if sm == null:
+		sm = SphereMesh.new()
+		sm.radius = radius
+		sm.height = radius * 2
+		_proj_mesh_cache[mk] = sm
+	var ck: String = "%f,%f,%f,%f" % [color.r, color.g, color.b, color.a]
+	var mat: StandardMaterial3D = _proj_mat_cache.get(ck) as StandardMaterial3D
+	if mat == null:
+		mat = StandardMaterial3D.new()
+		mat.albedo_color = color
+		mat.emission_enabled = true
+		mat.emission = color
+		mat.emission_energy_multiplier = 3.0
+		mat.roughness = 0.3
+		_proj_mat_cache[ck] = mat
 	var m := MeshInstance3D.new()
-	var sm := SphereMesh.new()
-	sm.radius = radius
-	sm.height = radius * 2
 	m.mesh = sm
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	mat.emission_enabled = true
-	mat.emission = color
-	mat.emission_energy_multiplier = 3.0
-	mat.roughness = 0.3
 	m.material_override = mat
 	return m
 
@@ -6287,13 +6363,25 @@ func _update_projectiles(delta: float) -> void:
 		var parea: float = p["area"]
 		var psplash: float = p.get("splash", 0.0)
 		var pmissile: bool = bool(p.get("missile", false))
-		pnode.position = pnode.position + pdir * pspeed * delta
+		# La posicion se lee UNA vez por bala y se reusa en todo el loop: cada
+		# pnode.position es una llamada nativa que devuelve un Variant, y esto corre
+		# varias veces por cada bala en pantalla.
+		var pp: Vector3 = pnode.position + pdir * pspeed * delta
+		pnode.position = pp
 		if pmissile:
 			# Misil: se alinea a la trayectoria, llama viva y estela de humo CLARA
 			# (humo claro contra el cielo = trayectoria legible para apuntar)
-			pnode.look_at(pnode.position + pdir, Vector3.UP)
-			var flame_n: Node = pnode.get_node_or_null("Flame")
-			if flame_n:
+			pnode.look_at(pp + pdir, Vector3.UP)
+			# El nodo Flame se resuelve una sola vez por misil y queda en la entrada de
+			# la bala: get_node por nombre cada frame por cada misil se pagaba entero.
+			var fl_v: Variant = p.get("flame")
+			var flame_n: Node = null
+			if fl_v == null:
+				flame_n = pnode.get_node_or_null("Flame")
+				p["flame"] = flame_n if flame_n != null else false
+			elif fl_v != false:
+				flame_n = fl_v as Node
+			if flame_n != null:
 				flame_n.scale = Vector3.ONE * randf_range(1.2, 2.2)
 			# Estela FINA: un puf chiquito y claro, pero uno cada MISSILE_TRAIL_GAP
 			# metros de recorrido (antes era uno por frame: pared blanca a 140 FPS y
@@ -6301,7 +6389,7 @@ func _update_projectiles(delta: float) -> void:
 			var td: float = float(p.get("trail_d", 0.0)) + pspeed * delta
 			if td >= MISSILE_TRAIL_GAP:
 				td = 0.0
-				_smoke_burst(pnode.position - pdir * 0.5, 1, 0.35, Color(0.92, 0.92, 0.88), MISSILE_TRAIL_PUFF, 0.4)
+				_smoke_burst(pp - pdir * 0.5, 1, 0.35, Color(0.92, 0.92, 0.88), MISSILE_TRAIL_PUFF, 0.4)
 			p["trail_d"] = td
 		plife -= delta
 		if plife <= 0:
@@ -6311,7 +6399,7 @@ func _update_projectiles(delta: float) -> void:
 		# Fuera del campo de juego no puede tocar a nadie: los enemigos nacen y viven
 		# dentro de ~270 m y siempre vienen hacia la base. Soltar aca recorta el
 		# tiempo que una bala perdida sigue costando CPU y un nodo dibujado.
-		var cull_p: Vector3 = pnode.position
+		var cull_p: Vector3 = pp
 		if absf(cull_p.x) > 340.0 or absf(cull_p.z) > 340.0 or cull_p.y > 220.0 or cull_p.y < -30.0:
 			pnode.queue_free()
 			projectiles.remove_at(i)
@@ -6319,7 +6407,7 @@ func _update_projectiles(delta: float) -> void:
 		# Collision: sale de la grilla (ver HitSpace). Entre los solapados gana el de
 		# indice mas alto en "enemies", igual que el for j descendente de antes.
 		var hit := false
-		var best_slot: int = _hs.best_hit(pnode.position, MAX_HIT_RADIUS + parea, parea)
+		var best_slot: int = _hs.best_hit(pp, MAX_HIT_RADIUS + parea, parea)
 		if best_slot >= 0:
 			var j: int = _hit_index_of(_hs.ids[best_slot])
 			if j >= 0:
@@ -6327,7 +6415,7 @@ func _update_projectiles(delta: float) -> void:
 				hit = true
 				if e["type"] == "tank" and psplash <= 0.0:
 					# Tanks only take damage from the cannon â€” pistol/AM spark off the armor
-					_hit_spark(pnode.position, 3, Color(0.7, 0.8, 1.0))
+					_hit_spark(pp, 3, Color(0.7, 0.8, 1.0))
 				elif psplash > 0.0:
 					# Cannon: detonate â€” direct damage to the hit target + area splash
 					# Regla anti "doble explosiÃ³n": la explosiÃ³n grande es SOLO de muerte.
@@ -6336,18 +6424,18 @@ func _update_projectiles(delta: float) -> void:
 					# - Soldados: boom de Ã¡rea SIEMPRE (arma de Ã¡rea; su muerte no genera boom).
 					# - Tanque que sobrevive: feedback de blindaje; si la bala lo destruye,
 					#   suena solo el boom de muerte (1 explosiÃ³n total).
-					var will_kill := _cannon_will_kill_vehicle(pnode.position, e, pdamage, psplash)
+					var will_kill := _cannon_will_kill_vehicle(pp, e, pdamage, psplash)
 					var etype: String = str(e["type"])
 					if etype == "soldier":
-						_big_boom(pnode.position, 1.1, Color(1, 0.65, 0.2), true)
+						_big_boom(pp, 1.1, Color(1, 0.65, 0.2), true)
 					elif etype == "tank":
 						if not will_kill:
-							_big_boom(pnode.position, 1.1, Color(1, 0.65, 0.2), true)
+							_big_boom(pp, 1.1, Color(1, 0.65, 0.2), true)
 					elif not will_kill:
-						_cannon_hull_spark(pnode.position)
+						_cannon_hull_spark(pp)
 					if e["type"] == "tank":
 						# El splash alcanza al tanque (alcance 12.5 > hitbox 11.5): 1 blindaje por bala
-						_cannon_splash(pnode.position, psplash)
+						_cannon_splash(pp, psplash)
 					else:
 						# DaÃ±o directo al objetivo: con hitboxes grandes el splash a veces no lo alcanza
 						var ehealth2: float = e["health"]
@@ -6355,35 +6443,41 @@ func _update_projectiles(delta: float) -> void:
 						e["health"] = ehealth2
 						if ehealth2 <= 0.0:
 							_kill_enemy(j)
-						_cannon_splash(pnode.position, psplash)
+						_cannon_splash(pp, psplash)
 				else:
 					# Pistol / AM: single-target damage
 					var ehealth: float = e["health"]
 					ehealth -= pdamage
 					e["health"] = ehealth
-					_hit_spark(pnode.position, 4, Color(1, 0.7, 0))
+					_hit_spark(pp, 4, Color(1, 0.7, 0))
 					if ehealth <= 0:
 						_kill_enemy(j)
 		# Collision with supply crates
+		# Distancia al cuadrado: distance_to() saca una raiz por caja y esto corre por
+		# cada bala en pantalla (400 balas x cajas, cada vez).
+		var crate_r: float = 2.2 + parea
+		var crate_r2: float = crate_r * crate_r
 		for k in range(crates.size() - 1, -1, -1):
 			var cnode: Node3D = crates[k]["node"]
-			if pnode.position.distance_to(cnode.position + Vector3(0, 0.5, 0)) < 2.2 + parea:
+			var cd: Vector3 = cull_p - cnode.position
+			cd.y -= 0.5
+			if cd.length_squared() < crate_r2:
 				_open_crate(k)
 				hit = true
 				break
 		# Cannon ground impact (sand) â†’ splash even if it didn't clip a target
-		if not hit and psplash > 0.0 and pnode.position.y <= 0.5:
+		if not hit and psplash > 0.0 and pp.y <= 0.5:
 			# Anti "explosiÃ³n fantasma": si la bala muere sobre un casco reciÃ©n destruido
 			# (â‰¤2.5s y â‰¤10m), se disuelve sin visual ni sonido (el boom de muerte ya
 			# cubriÃ³ esa zona). Si el splash mata a un barco/heli/tank, su boom de
 			# muerte reemplaza al de impacto. El splash de daÃ±o SÃ sigue aplicando.
 			var _now_t: float = Time.get_ticks_msec() / 1000.0
-			var _dxz: float = Vector2(pnode.position.x - last_kill_boom_pos.x, pnode.position.z - last_kill_boom_pos.z).length()
+			var _dxz: float = Vector2(pp.x - last_kill_boom_pos.x, pp.z - last_kill_boom_pos.z).length()
 			var _near_kill: bool = (_now_t - last_kill_boom_t) <= 4.0 and _dxz <= 14.0
 			var _dummy: Dictionary = {"type": "soldier", "health": 1.0}
-			if not _near_kill and not _cannon_will_kill_vehicle(pnode.position, _dummy, 0.0, psplash):
-				_big_boom(pnode.position + Vector3(0, 0.3, 0), 1.3, Color(1, 0.6, 0.2), true)
-			_cannon_splash(pnode.position, psplash)
+			if not _near_kill and not _cannon_will_kill_vehicle(pp, _dummy, 0.0, psplash):
+				_big_boom(pp + Vector3(0, 0.3, 0), 1.3, Color(1, 0.6, 0.2), true)
+			_cannon_splash(pp, psplash)
 			hit = true
 		if hit:
 			pnode.queue_free()
@@ -6645,11 +6739,25 @@ func _update_enemies(delta: float) -> void:
 					enode.queue_free()
 					enemies.remove_at(i)
 			"soldier":
-				var sap: AnimationPlayer = enode.get_node_or_null("AnimationPlayer") as AnimationPlayer
+				# AnimationPlayer, Rifle y skeleton quedan guardados en la entrada del
+				# enemigo: tres busquedas por nombre por soldado, cada frame, se pagaban
+				# enteras (0,6 us c/u medidas en headless; con 80 soldados ~150 us/frame).
+				var sap: AnimationPlayer = e.get("ap") as AnimationPlayer
+				if sap == null:
+					sap = enode.get_node_or_null("AnimationPlayer") as AnimationPlayer
+					e["ap"] = sap
+				var sg: Node3D = e.get("gun") as Node3D
+				if sg == null:
+					sg = enode.get_node_or_null("Rifle") as Node3D
+					e["gun"] = sg
+				var ssk: Skeleton3D = e.get("skel") as Skeleton3D
+				if ssk == null:
+					ssk = enode.get_node_or_null("Rig/Skeleton3D") as Skeleton3D
+					e["skel"] = ssk
 				var aiming: bool = float(e.get("aim_t", 0.0)) > 0.0
 				e["aim_t"] = maxf(0.0, float(e.get("aim_t", 0.0)) - delta)
-				_set_soldier_gun_pose(enode, aiming)
-				_sync_gear(enode)
+				_set_soldier_gun_pose(enode, aiming, sg)
+				_sync_gear(enode, ssk)
 				# Sigue el terreno (rocas/arena) para no atravesar la geometrÃ­a
 				enode.position.y = _terrain_height(enode.position.x, enode.position.z)
 				var spos2: Vector2 = Vector2(enode.position.x, enode.position.z)
