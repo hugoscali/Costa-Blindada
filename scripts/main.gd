@@ -6379,7 +6379,7 @@ func _update_projectiles(delta: float) -> void:
 			if fl_v == null:
 				flame_n = pnode.get_node_or_null("Flame")
 				p["flame"] = flame_n if flame_n != null else false
-			elif fl_v != false:
+			elif not (fl_v is bool):
 				flame_n = fl_v as Node
 			if flame_n != null:
 				flame_n.scale = Vector3.ONE * randf_range(1.2, 2.2)
