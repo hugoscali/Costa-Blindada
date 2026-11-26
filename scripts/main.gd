@@ -2484,8 +2484,9 @@ func _build_environment() -> void:
 	# OCEAN (Godot SSR Water â€” SSR + transparencia + olas 3D + espuma de orilla)
 	var ocean_mesh := PlaneMesh.new()
 	ocean_mesh.size = Vector2(300, 230)
-	ocean_mesh.subdivide_width = 200
-	ocean_mesh.subdivide_depth = 150
+	# Valor de arranque (ALTA); _apply_quality() lo pisa en _ready segun el nivel guardado.
+	ocean_mesh.subdivide_width = 160
+	ocean_mesh.subdivide_depth = 120
 	var ocean_shader := load("res://assets/ssr_water/water.gdshader")
 	var ocean_mat := ShaderMaterial.new()
 	ocean_mat.shader = ocean_shader
@@ -2567,6 +2568,10 @@ func _build_environment() -> void:
 	var ocean := MeshInstance3D.new()
 	ocean.mesh = ocean_mesh
 	ocean.material_override = ocean_mat
+	# El oceano NO proyecta sombra: es un plano horizontal que esta por debajo de todo,
+	# asi que no ensombrece nada visible. Igual el motor lo dibujaba en el shadow pass
+	# (PSSM 2 splits = 2 veces por frame) con ~60.000 triangulos cada vez.
+	ocean.cast_shadow = SHADOW_CASTING_OFF
 	ocean.position = Vector3(0, -0.35, -100)
 	world.add_child(ocean)
 	water_node = ocean
@@ -4093,22 +4098,27 @@ func _apply_quality(level: int) -> void:
 				env.ssr_max_steps = 96
 				env.glow_enabled = true
 	if env:
-		env.ssil_enabled = (level == 2)
+		# SSIL (Screen-Space IndirectLighting) OFF en todos los niveles: en ALTA ya
+		# entran SDFGI + SSAO, asi que SSIL era redundante y el mas caro de los tres.
+		env.ssil_enabled = false
 	# Detalle de partÃ­culas segÃºn calidad
 	particle_scale = [0.4, 0.7, 1.0][level]
 	# Detalle de la malla del ocÃ©ano (menos subdivisiones = mÃ¡s barato)
 	if water_node and water_node.mesh is PlaneMesh:
 		var pm: PlaneMesh = water_node.mesh
+		# Olas 3D de la malla: el plano hace 300x230 m. Con 160x120 cada subdivision es
+		# una celda de ~1,9 m y 38.400 triangulos (el 200x150 viejo eran 60.000 con
+		# celda de 1,5 m: apenas mas fino y muchisimo mas caro en la orilla).
 		match level:
 			0:
 				pm.subdivide_width = 60
 				pm.subdivide_depth = 45
 			1:
-				pm.subdivide_width = 120
-				pm.subdivide_depth = 90
+				pm.subdivide_width = 90
+				pm.subdivide_depth = 68
 			2:
-				pm.subdivide_width = 200
-				pm.subdivide_depth = 150
+				pm.subdivide_width = 160
+				pm.subdivide_depth = 120
 	# SSR del ocÃ©ano (refleja buques/barcos en el agua): alcance de la ray segÃºn calidad
 	if water_node and water_node.material_override is ShaderMaterial:
 		var wm: ShaderMaterial = water_node.material_override
